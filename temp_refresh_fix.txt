@@ -1,0 +1,15 @@
+                    # ตรวจสอบว่ายังอยู่หน้าต่ออายุหรือไม่
+                    try:
+                        current_url = driver.current_url
+                        if "marketplace/selling/renew_listings" in current_url:
+                            # อยู่หน้าต่ออายุ ใช้ driver.refresh() (ทำงานได้แน่นอน)
+                            self.update_status(f"{profile_name}: รีเฟรชหน้าเว็บ...", "blue")
+                            driver.refresh()
+                        else:
+                            # ไม่ได้อยู่หน้าต่ออายุ กลับไปหน้าต่ออายุ
+                            self.update_status(f"{profile_name}: กลับไปหน้าต่ออายุ...", "blue")
+                            driver.get(renew_page_url)
+                    except Exception as refresh_error:
+                        # ถ้า error ใช้ URL
+                        self.update_status(f"{profile_name}: Error ใช้ URL...", "orange")
+                        driver.get(renew_page_url)

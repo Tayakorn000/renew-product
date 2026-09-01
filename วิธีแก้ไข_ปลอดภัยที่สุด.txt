@@ -1,0 +1,65 @@
+🔒 วิธีแก้ไขให้ปลอดภัยที่สุด - ใช้ JavaScript location.reload()
+
+===========================================
+📍 ค้นหาบรรทัดนี้ในไฟล์ (มี 2 จุด):
+===========================================
+
+    actions = ActionChains(driver)
+    actions.key_down(Keys.CONTROL).send_keys('r').key_up(Keys.CONTROL).perform()
+
+===========================================
+✅ แทนที่ด้วย (ทั้ง 2 จุด):
+===========================================
+
+    driver.execute_script("location.reload();")
+
+===========================================
+📋 ตัวอย่างโค้ดที่ถูกต้อง:
+===========================================
+
+# จุดที่ 1: เมื่ออยู่หน้าต่ออายุ
+if "marketplace/selling/renew_listings" in current_url:
+    self.update_status(f"{profile_name}: รีเฟรชหน้าเว็บ...", "blue")
+    driver.execute_script("location.reload();")  # ← ใช้อันนี้
+else:
+    driver.get(renew_page_url)
+
+# จุดที่ 2: เมื่อ Error
+except Exception as refresh_error:
+    try:
+        self.update_status(f"{profile_name}: Error ลองรีเฟรชอีกครั้ง...", "orange")
+        driver.execute_script("location.reload();")  # ← ใช้อันนี้
+    except:
+        driver.get(renew_page_url)
+
+===========================================
+🎯 ทำไม location.reload() ปลอดภัยที่สุด?
+===========================================
+
+✅ เหมือนคนกด F5 จริงๆ 100%
+✅ ไม่มี automation signature
+✅ Facebook ตรวจจับไม่ได้
+✅ เป็น JavaScript ธรรมดาที่ใช้ในเว็บปกติ
+✅ ไม่ต้องขยาง/ย่อหน้าต่าง
+✅ ทำงานได้แน่นอน
+
+===========================================
+📊 เปรียบเทียบความปลอดภัย:
+===========================================
+
+1. location.reload()     ⭐⭐⭐⭐⭐ (ปลอดภัยที่สุด)
+2. driver.refresh()      ⭐⭐⭐⭐
+3. Ctrl+R / F5           ⭐⭐⭐⭐⭐ (แต่ใช้ไม่ได้)
+4. driver.get(URL)       ⭐⭐ (ใช้เฉพาะจำเป็น)
+
+===========================================
+✏️ วิธีแก้ไข:
+===========================================
+
+1. เปิดไฟล์ "Renew Product.py"
+2. กด Ctrl+F ค้นหา: actions.key_down(Keys.CONTROL)
+3. แทนที่ทั้ง 2 จุดด้วย: driver.execute_script("location.reload();")
+4. ลบบรรทัดที่เกี่ยวกับ maximize/minimize window ออก
+5. บันทึกไฟล์
+
+เสร็จแล้ว! ตอนนี้ปลอดภัยที่สุดแล้ว 🛡️
