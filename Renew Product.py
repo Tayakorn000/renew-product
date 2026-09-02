@@ -1584,10 +1584,10 @@ class FacebookMarketplaceRenewer:
                 except:
                     pass
                 
-                # ค้นหาปุ่มต่ออายุ — รอสูงสุด 20 วิ (เดิม 120 วิ x สูงสุด 4 รอบ = ค้าง 8 นาทีตอนต่ออายุหมดแล้ว)
+                # ค้นหาปุ่มต่ออายุ — รอสูงสุด 90 วิ (เดิม 120 วิ x สูงสุด 4 รอบ = ค้าง 8 นาทีตอนต่ออายุหมดแล้ว)
                 renew_buttons = []
                 try:
-                    renew_buttons = WebDriverWait(driver, 20).until(
+                    renew_buttons = WebDriverWait(driver, 90).until(
                         EC.presence_of_all_elements_located((By.XPATH, "//span[@class='x1lliihq x6ikm8r x10wlt62 x1n2onr6 xlyipyv xuxw1ft' and text()='ต่ออายุ']"))
                     )
                 except:
