@@ -1,19 +1,30 @@
 ﻿import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
+try:
+    import undetected_chromedriver as uc
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.webdriver.common.keys import Keys
+except ImportError:
+    # selenium ไม่มีในเครื่อง (เช่น ตอนรัน test เฉพาะ logic จับคู่โฟลเดอร์บนเครื่องที่ไม่ได้ตั้ง dev env)
+    # โปรแกรมจริงต้องมี selenium เสมอ ส่วนที่ใช้ driver จะพังถ้าเรียกตอนไม่มี
+    uc = By = WebDriverWait = EC = ActionChains = Keys = None
 import time
 import os
+import re
 import configparser
 import threading
 import json
 import random
 
 class FacebookMarketplaceRenewer:
+    IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
+    VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
+    REVIEW_KEYWORDS = ['รีวิว']
+    EXTRA_KEYWORDS = ['เพิ่มเติม']
+
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("ต่ออายุสินค้า Facebook Marketplace")
@@ -24,12 +35,21 @@ class FacebookMarketplaceRenewer:
         self.settings_file = "renew_settings.json"
         self.profiles = {}
         self.current_profile = None
-        
+
+        # ตอบแชทอัตโนมัติ (Marketplace inbox)
+        self.reply_settings_file = "reply_settings.json"
+        self.reply_root_folder = None
+        self.reply_state = {}  # {profile_name: {thread_id: {...}}}
+        self.auto_reply_active = False
+        self.reply_drivers = {}  # profile_name -> driver ที่ยังเปิดอยู่ระหว่างตอบแชท
+        self._reply_list_index = []  # index ของ reply_listbox -> (profile_name, thread_id)
+
         # ตั้งค่าให้ปิด Chrome ทั้งหมดเมื่อปิดหน้าต่าง GUI
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
+
         # โหลดการตั้งค่าที่บันทึกไว้
         self.load_settings()
+        self.load_reply_settings()
         self.setup_gui()
     
     def on_closing(self):
@@ -490,7 +510,27 @@ class FacebookMarketplaceRenewer:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
-        
+
+    def load_reply_settings(self):
+        """โหลดการตั้งค่าตอบแชทอัตโนมัติ (โฟลเดอร์สินค้า + ประวัติแชทที่ตอบไปแล้ว)"""
+        try:
+            if os.path.exists(self.reply_settings_file):
+                with open(self.reply_settings_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.reply_root_folder = data.get('root_folder')
+                    self.reply_state = data.get('state', {})
+        except Exception:
+            pass
+
+    def save_reply_settings(self):
+        """บันทึกการตั้งค่าตอบแชทอัตโนมัติ"""
+        try:
+            data = {'root_folder': self.reply_root_folder, 'state': self.reply_state}
+            with open(self.reply_settings_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     def setup_gui(self):
         # หัวข้อ
         title_label = tk.Label(
@@ -622,7 +662,58 @@ class FacebookMarketplaceRenewer:
             cursor="hand2"
         )
         self.start_button.pack(fill=tk.X)
-        
+
+        # กรอบตอบแชทลูกค้าอัตโนมัติ (Marketplace inbox) — ใช้ Profile ที่เลือกด้านบนร่วมกัน
+        reply_frame = tk.LabelFrame(self.root, text="ตอบแชทลูกค้าอัตโนมัติ (Marketplace)", font=("Arial", 10, "bold"), padx=10, pady=10)
+        reply_frame.pack(pady=5, padx=20, fill=tk.BOTH, expand=True)
+
+        folder_row = tk.Frame(reply_frame)
+        folder_row.pack(fill=tk.X, pady=3)
+        tk.Label(folder_row, text="โฟลเดอร์สินค้า:", font=("Arial", 9), width=12, anchor=tk.W).pack(side=tk.LEFT)
+        self.reply_folder_var = tk.StringVar(value=self.reply_root_folder or "ยังไม่ได้เลือก")
+        tk.Label(folder_row, textvariable=self.reply_folder_var, font=("Arial", 9), fg="gray", anchor=tk.W).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        tk.Button(folder_row, text="เลือกโฟลเดอร์", command=self.browse_reply_folder, font=("Arial", 9), cursor="hand2").pack(side=tk.RIGHT)
+
+        reply_btn_row = tk.Frame(reply_frame)
+        reply_btn_row.pack(fill=tk.X, pady=5)
+        self.reply_start_btn = tk.Button(
+            reply_btn_row, text="เริ่มตอบแชทอัตโนมัติ (Profile ที่เลือกด้านบน)",
+            command=self.start_auto_reply, bg="#2196F3", fg="white",
+            font=("Arial", 10, "bold"), cursor="hand2"
+        )
+        self.reply_start_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.reply_stop_btn = tk.Button(
+            reply_btn_row, text="หยุด", command=self.stop_auto_reply,
+            bg="#f44336", fg="white", font=("Arial", 10, "bold"),
+            state=tk.DISABLED, cursor="hand2", width=8
+        )
+        self.reply_stop_btn.pack(side=tk.RIGHT)
+
+        tk.Label(reply_frame, text="แชทที่ตอบไปแล้ว:", font=("Arial", 9, "bold")).pack(anchor=tk.W, pady=(5, 0))
+        reply_list_frame = tk.Frame(reply_frame)
+        reply_list_frame.pack(fill=tk.BOTH, expand=True, pady=3)
+        reply_scrollbar = tk.Scrollbar(reply_list_frame)
+        reply_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.reply_listbox = tk.Listbox(
+            reply_list_frame, font=("Arial", 9), height=5,
+            yscrollcommand=reply_scrollbar.set
+        )
+        self.reply_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        reply_scrollbar.config(command=self.reply_listbox.yview)
+
+        manual_btn_row = tk.Frame(reply_frame)
+        manual_btn_row.pack(fill=tk.X, pady=3)
+        tk.Button(
+            manual_btn_row, text="ส่งรีวิวเพิ่ม (แชทที่เลือก)",
+            command=lambda: self.manual_send_category('review'),
+            font=("Arial", 9), cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Button(
+            manual_btn_row, text="ส่งข้อมูลเพิ่มเติม (แชทที่เลือก)",
+            command=lambda: self.manual_send_category('extra'),
+            font=("Arial", 9), cursor="hand2"
+        ).pack(side=tk.LEFT)
+
         # สถานะ
         self.status_label = tk.Label(
             self.root,
@@ -634,6 +725,7 @@ class FacebookMarketplaceRenewer:
         
         # อัปเดต Listbox
         self.update_profile_list()
+        self.update_reply_list()
     
     def update_profile_list(self):
         """อัปเดตรายการ Profile ใน Listbox"""
@@ -770,10 +862,11 @@ class FacebookMarketplaceRenewer:
         self.is_running = True
         self.update_status(f"เริ่มต่ออายุ {len(self.selected_profiles)} Profile...", "blue")
         
-        # ล็อคปุ่มระหว่างทำงาน
+        # ล็อคปุ่มระหว่างทำงาน (ล็อคปุ่มตอบแชทด้วย กันชนกันบน Profile เดียวกัน)
         self.start_button.config(state=tk.DISABLED, bg="#9E9E9E", text="กำลังทำงาน...")
         self.delete_btn.config(state=tk.DISABLED)
-        
+        self.reply_start_btn.config(state=tk.DISABLED, bg="#9E9E9E")
+
         # รันใน thread แยก
         thread = threading.Thread(target=self.run_renewal_thread, daemon=True)
         thread.start()
@@ -791,6 +884,7 @@ class FacebookMarketplaceRenewer:
                 state=tk.NORMAL, bg="#4CAF50", text="เริ่มต่ออายุสินค้า (Profile ที่เลือก)"
             ))
             self.root.after(0, lambda: self.delete_btn.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.reply_start_btn.config(state=tk.NORMAL, bg="#2196F3"))
     
     def update_status(self, text, color):
         """อัปเดตสถานะอย่างปลอดภัยจาก thread"""
@@ -1008,8 +1102,8 @@ class FacebookMarketplaceRenewer:
         except Exception as e:
             print(f"_clean_mismatched_chromedriver: {e}")
 
-    def open_and_login_profile(self, profile_name):
-        """เปิด Chrome และล็อคอินจนถึงหน้า Renew"""
+    def open_and_login_profile(self, profile_name, target_url="https://www.facebook.com/marketplace/selling/renew_listings/"):
+        """เปิด Chrome และล็อคอินจนถึงหน้าที่ระบุ (ค่าเริ่มต้น: หน้า Renew)"""
         driver = None
         
         try:
@@ -1371,15 +1465,15 @@ class FacebookMarketplaceRenewer:
                 self.human_like_scroll(driver, "down")
                 time.sleep(random.uniform(0.8, 1.5))
             
-            # แล้วค่อยไปหน้าต่ออายุ
+            # แล้วค่อยไปหน้าที่ต้องการ (renew หรือ inbox แล้วแต่โหมด)
             time.sleep(random.uniform(1.0, 2.5))
-            driver.get("https://www.facebook.com/marketplace/selling/renew_listings/")
-            
-            # รอให้หน้าต่ออายุโหลดเสร็จ
+            driver.get(target_url)
+
+            # รอให้หน้าโหลดเสร็จ
             self.wait_for_page_load(driver)
             time.sleep(random.uniform(3, 5))
-            
-            self.update_status(f"{profile_name}: เข้าหน้าต่ออายุสำเร็จ", "green")
+
+            self.update_status(f"{profile_name}: เข้าหน้า {target_url} สำเร็จ", "green")
             
             # ย้ายหน้าต่างออกนอกจอหลังเข้าหน้าต่ออายุสำเร็จ
             try:
@@ -1754,7 +1848,470 @@ class FacebookMarketplaceRenewer:
                     driver.quit()
                 except:
                     pass
-    
+
+    # ========== ตอบแชทลูกค้าอัตโนมัติ (Marketplace inbox) ==========
+    # หมายเหตุ: selector ของ DOM inbox/ห้องแชทด้านล่าง (get_selectors) เป็นการเดาที่ดีที่สุด
+    # จากรูปแบบที่ Facebook ใช้ทั่วไป (aria-label/role — ไม่ใช้ atomic class เพราะเปลี่ยนทุก build)
+    # ยังไม่เคยทดสอบกับ DOM จริง ต้องปรับตอน live-test บนเครื่องลูกค้า
+
+    def strip_leading_number(self, name):
+        """ตัดเลขนำหน้าชื่อโฟลเดอร์ออก เช่น '12. โซฟา 2 ที่นั่ง' -> 'โซฟา 2 ที่นั่ง'"""
+        return re.sub(r'^[\s\d.\-_)]+', '', name).strip()
+
+    def collect_folder_assets(self, folder_path):
+        """เก็บรูป/วิดีโอ/ข้อความ .txt จากไฟล์ระดับบนสุดของโฟลเดอร์นี้ (ไม่ลงลึกโฟลเดอร์ย่อย)"""
+        images, videos, texts = [], [], []
+        try:
+            for fname in sorted(os.listdir(folder_path)):
+                fpath = os.path.join(folder_path, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in self.IMAGE_EXTS:
+                    images.append(fpath)
+                elif ext in self.VIDEO_EXTS:
+                    videos.append(fpath)
+                elif ext == '.txt':
+                    texts.append(fpath)
+        except Exception:
+            pass
+
+        text_content = ""
+        for tpath in texts:
+            try:
+                with open(tpath, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        text_content += (("\n\n" if text_content else "") + content)
+            except Exception:
+                pass
+
+        return {'images': images, 'videos': videos, 'text': text_content}
+
+    def scan_product_folders(self, root_folder):
+        """สแกนโฟลเดอร์สินค้าทั้งหมดใต้ root_folder แยกเป็น หลัก/รีวิว/เพิ่มเติม ต่อสินค้า 1 โฟลเดอร์
+        สมมติฐาน (ไม่มีสกรีนช็อตต้นฉบับแล้วหลัง compact): โฟลเดอร์ย่อยที่ชื่อมีคำว่า "รีวิว"/"เพิ่มเติม"
+        คือหมวดนั้น ที่เหลือ (ไฟล์ระดับบน + โฟลเดอร์ย่อยอื่น) ถือเป็นหลักทั้งหมด
+        คืนค่า {ชื่อสินค้า(ตัดเลขนำหน้าแล้ว): {'path':.., 'main':{...}, 'review':{...}|None, 'extra':{...}|None}}"""
+        result = {}
+        if not root_folder or not os.path.isdir(root_folder):
+            return result
+
+        for entry in sorted(os.listdir(root_folder)):
+            entry_path = os.path.join(root_folder, entry)
+            if not os.path.isdir(entry_path):
+                continue
+
+            product_name = self.strip_leading_number(entry)
+            if not product_name:
+                continue
+
+            review_path = None
+            extra_path = None
+            other_subfolders = []
+
+            try:
+                sub_entries = os.listdir(entry_path)
+            except Exception:
+                sub_entries = []
+
+            for sub in sub_entries:
+                sub_path = os.path.join(entry_path, sub)
+                if not os.path.isdir(sub_path):
+                    continue
+                if any(k in sub for k in self.REVIEW_KEYWORDS):
+                    review_path = sub_path
+                elif any(k in sub for k in self.EXTRA_KEYWORDS):
+                    extra_path = sub_path
+                else:
+                    other_subfolders.append(sub_path)
+
+            main_assets = self.collect_folder_assets(entry_path)
+            for sub_path in other_subfolders:
+                sub_assets = self.collect_folder_assets(sub_path)
+                main_assets['images'] += sub_assets['images']
+                main_assets['videos'] += sub_assets['videos']
+                if sub_assets['text']:
+                    main_assets['text'] += (("\n\n" if main_assets['text'] else "") + sub_assets['text'])
+
+            result[product_name] = {
+                'path': entry_path,
+                'main': main_assets,
+                'review': self.collect_folder_assets(review_path) if review_path else None,
+                'extra': self.collect_folder_assets(extra_path) if extra_path else None,
+            }
+
+        return result
+
+    def match_listing_to_folder(self, listing_name, product_folders):
+        """จับคู่ชื่อสินค้าที่ลูกค้าทักกับชื่อโฟลเดอร์ — ต้องเจอ 1 คู่เป๊ะเท่านั้น
+        0 คู่ หรือ >=2 คู่ = ไม่จับคู่ (กันส่งข้อมูลสินค้าผิดให้ลูกค้า)"""
+        if not listing_name:
+            return None
+        matches = [name for name in product_folders if name and name in listing_name]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def split_text_to_messages(self, text):
+        """แยกข้อความยาวเป็นย่อหน้า เพื่อส่งทีละข้อความ (ไม่ส่งไฟล์ .txt ให้ลูกค้าตรงๆ)"""
+        if not text:
+            return []
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+        return paragraphs
+
+    def get_selectors(self):
+        """ตาราง selector ของ element ใน Marketplace inbox/ห้องแชท เรียงตามลำดับที่จะลอง
+        ใช้ aria-label/role/text ก่อนเสมอ ห้ามใช้ atomic class (x1abc...) เพราะเปลี่ยนทุก build ของ FB"""
+        return {
+            'conversation_row': [
+                (By.XPATH, "//div[@role='grid']//a[contains(@href,'/marketplace/t/')]"),
+                (By.XPATH, "//a[contains(@href,'/marketplace/t/')]"),
+                (By.XPATH, "//div[@role='row']//a[contains(@href,'/t/')]"),
+            ],
+            'listing_title': [
+                (By.XPATH, "//a[contains(@href,'/marketplace/item/')]"),
+                (By.XPATH, "//div[@role='main']//h2"),
+            ],
+            'message_box': [
+                (By.XPATH, "//div[@aria-label='ข้อความ' and @role='textbox']"),
+                (By.XPATH, "//div[@aria-label='Message' and @role='textbox']"),
+                (By.XPATH, "//div[@role='textbox' and @contenteditable='true']"),
+            ],
+            'file_input': [
+                (By.XPATH, "//input[@type='file' and contains(@accept,'image')]"),
+                (By.XPATH, "//input[@type='file']"),
+            ],
+            'incoming_bubble': [
+                (By.XPATH, "//div[@role='main']//div[@role='row']"),
+            ],
+        }
+
+    def find_first(self, driver, key, context=None, wait=0):
+        """หา element ตัวแรกที่เจอ ลองทีละ selector ตามลำดับใน get_selectors()[key]
+        context ใช้จำกัดขอบเขตค้นหาให้เป็น element แทน driver ทั้งหน้า"""
+        scope = context if context is not None else driver
+        for by, expr in self.get_selectors().get(key, []):
+            try:
+                if wait > 0 and context is None:
+                    el = WebDriverWait(driver, wait).until(EC.presence_of_element_located((by, expr)))
+                else:
+                    el = scope.find_element(by, expr)
+                return el
+            except Exception:
+                continue
+        return None
+
+    def find_all(self, driver, key, context=None):
+        """คืนทุก element ที่เจอจาก selector แรกใน get_selectors()[key] ที่ใช้ได้ผล"""
+        scope = context if context is not None else driver
+        for by, expr in self.get_selectors().get(key, []):
+            try:
+                els = scope.find_elements(by, expr)
+                if els:
+                    return els
+            except Exception:
+                continue
+        return []
+
+    def upload_files_to_chat(self, driver, file_paths):
+        """แนบไฟล์ผ่าน input[type=file] โดยตรง (ห้ามคลิกปุ่มแนบไฟล์ — เปิด OS dialog ที่ Selenium สั่งไม่ได้)"""
+        file_input = self.find_first(driver, 'file_input', wait=5)
+        if not file_input:
+            self.update_status("ไม่พบช่องแนบไฟล์ (file_input) - ต้องปรับ selector", "red")
+            return False
+        try:
+            driver.execute_script(
+                "arguments[0].style.display='block'; arguments[0].style.opacity=1; "
+                "arguments[0].style.visibility='visible'; arguments[0].removeAttribute('hidden');",
+                file_input
+            )
+        except Exception:
+            pass
+        try:
+            file_input.send_keys("\n".join(file_paths))
+            time.sleep(random.uniform(2, 4) * max(1, len(file_paths) // 5))
+            return True
+        except Exception as e:
+            self.update_status(f"แนบไฟล์ไม่สำเร็จ: {str(e)[:80]}", "red")
+            return False
+
+    def send_chat_message(self, driver, text):
+        """พิมพ์และส่งข้อความในห้องแชท (ใช้ human_like_type เดิม)"""
+        box = self.find_first(driver, 'message_box', wait=5)
+        if not box:
+            self.update_status("ไม่พบช่องพิมพ์ข้อความ (message_box) - ต้องปรับ selector", "red")
+            return False
+        try:
+            box.click()
+            time.sleep(random.uniform(0.3, 0.7))
+            self.human_like_type(box, text, driver)
+            time.sleep(random.uniform(0.3, 0.8))
+            box.send_keys(Keys.RETURN)
+            return True
+        except Exception as e:
+            self.update_status(f"ส่งข้อความไม่สำเร็จ: {str(e)[:80]}", "red")
+            return False
+
+    def send_folder_content(self, driver, assets):
+        """ส่งรูป+วิดีโอก่อน แล้วค่อยส่งข้อความจาก .txt ทีละย่อหน้า"""
+        media_files = assets.get('images', []) + assets.get('videos', [])
+        if media_files:
+            self.upload_files_to_chat(driver, media_files)
+            self.random_sleep(2, 5)
+
+        for msg in self.split_text_to_messages(assets.get('text', '')):
+            self.send_chat_message(driver, msg)
+            self.random_sleep(2, 6)
+
+    def browse_reply_folder(self):
+        """เลือกโฟลเดอร์แม่ที่รวมโฟลเดอร์สินค้าทั้งหมด (แต่ละสินค้า = 1 โฟลเดอร์ย่อย)"""
+        folder = filedialog.askdirectory(title="เลือกโฟลเดอร์สินค้า (แต่ละสินค้าคือ 1 โฟลเดอร์ย่อย)")
+        if folder:
+            self.reply_root_folder = folder
+            self.reply_folder_var.set(folder)
+            self.save_reply_settings()
+
+    def update_reply_list(self):
+        """อัปเดตรายการ 'แชทที่ตอบไปแล้ว' ใน Listbox จาก self.reply_state"""
+        self.reply_listbox.delete(0, tk.END)
+        self._reply_list_index = []
+        for profile_name, threads in self.reply_state.items():
+            for thread_id, info in threads.items():
+                status_txt = "✓ ตอบแล้ว" if info.get('status') == 'replied' else "⚠ จับคู่ไม่ได้"
+                label = f"[{profile_name}] {info.get('product', '?')} - {status_txt} ({info.get('replied_at', '')})"
+                self.reply_listbox.insert(tk.END, label)
+                self._reply_list_index.append((profile_name, thread_id))
+
+    def start_auto_reply(self):
+        selected_indices = self.profile_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("คำเตือน", "กรุณาเลือกอย่างน้อย 1 Profile")
+            return
+        if not self.reply_root_folder or not os.path.isdir(self.reply_root_folder):
+            messagebox.showwarning("คำเตือน", "กรุณาเลือกโฟลเดอร์สินค้าก่อน")
+            return
+        if self.is_running:
+            messagebox.showwarning("คำเตือน", "กำลังดำเนินการอยู่ กรุณารอให้เสร็จก่อน")
+            return
+
+        self.selected_profiles = [self.profile_listbox.get(i) for i in selected_indices]
+        confirm = messagebox.askyesno(
+            "ยืนยัน",
+            f"ต้องการเริ่มตอบแชทอัตโนมัติสำหรับ {len(self.selected_profiles)} Profile หรือไม่?\n\n" +
+            "\n".join(self.selected_profiles)
+        )
+        if not confirm:
+            return
+
+        self.is_running = True
+        self.auto_reply_active = True
+        self.update_status(f"เริ่มตอบแชทอัตโนมัติ {len(self.selected_profiles)} Profile...", "blue")
+
+        self.start_button.config(state=tk.DISABLED, bg="#9E9E9E")
+        self.reply_start_btn.config(state=tk.DISABLED, bg="#9E9E9E")
+        self.reply_stop_btn.config(state=tk.NORMAL)
+        self.delete_btn.config(state=tk.DISABLED)
+
+        thread = threading.Thread(target=self.run_auto_reply_thread, daemon=True)
+        thread.start()
+
+    def stop_auto_reply(self):
+        """สั่งหยุด — worker แต่ละ Profile จะเช็คแฟล็กนี้แล้วปิด Chrome ของตัวเองตอนจบรอบสแกน"""
+        self.auto_reply_active = False
+        self.update_status("กำลังหยุดตอบแชท (รอ Chrome ปิดครบทุก Profile)...", "orange")
+
+    def run_auto_reply_thread(self):
+        try:
+            self.auto_reply_multiple_profiles()
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("ข้อผิดพลาด", f"เกิดข้อผิดพลาด: {str(e)}"))
+        finally:
+            self.is_running = False
+            self.auto_reply_active = False
+            self.reply_drivers = {}
+            self.root.after(0, lambda: self.start_button.config(state=tk.NORMAL, bg="#4CAF50"))
+            self.root.after(0, lambda: self.reply_start_btn.config(state=tk.NORMAL, bg="#2196F3"))
+            self.root.after(0, lambda: self.reply_stop_btn.config(state=tk.DISABLED))
+            self.root.after(0, lambda: self.delete_btn.config(state=tk.NORMAL))
+            self.root.after(0, self.update_reply_list)
+
+    def auto_reply_multiple_profiles(self):
+        """เปิด Chrome ทุก Profile ที่เลือก แล้วเริ่ม monitor แชทพร้อมกันจนกว่าจะกดหยุด"""
+        product_folders = self.scan_product_folders(self.reply_root_folder)
+        if not product_folders:
+            self.update_status("ไม่พบโฟลเดอร์สินค้าในที่เลือก", "red")
+            return
+
+        self.reply_drivers = {}
+        threads = []
+
+        for index, profile_name in enumerate(self.selected_profiles, 1):
+            if not self.auto_reply_active:
+                break
+            self.update_status(f"[{index}/{len(self.selected_profiles)}] กำลังเปิด Chrome: {profile_name}", "blue")
+            try:
+                driver = self.open_and_login_profile(profile_name, target_url="https://www.facebook.com/marketplace/inbox/")
+                if driver:
+                    self.reply_drivers[profile_name] = driver
+                    t = threading.Thread(
+                        target=self.auto_reply_worker,
+                        args=(profile_name, driver, product_folders),
+                        daemon=True
+                    )
+                    threads.append(t)
+                    t.start()
+                if index < len(self.selected_profiles):
+                    time.sleep(random.uniform(4, 12))
+            except Exception as e:
+                self.update_status(f"{profile_name}: เปิดไม่สำเร็จ - {str(e)[:80]}", "red")
+                continue
+
+        for t in threads:
+            t.join()
+
+        self.update_status("หยุดตอบแชทอัตโนมัติทุก Profile แล้ว", "green")
+
+    def auto_reply_worker(self, profile_name, driver, product_folders):
+        """monitor inbox ของ Profile นี้ วนหาแชทใหม่แล้วตอบอัตโนมัติ จนกว่า auto_reply_active จะเป็น False"""
+        self.reply_state.setdefault(profile_name, {})
+
+        while self.auto_reply_active:
+            try:
+                driver.current_url
+            except Exception:
+                self.update_status(f"{profile_name}: Chrome ถูกปิดไปแล้ว", "red")
+                break
+
+            try:
+                driver.get("https://www.facebook.com/marketplace/inbox/")
+                self.wait_for_page_load(driver)
+                time.sleep(random.uniform(2, 4))
+
+                rows = self.find_all(driver, 'conversation_row')
+                seen_this_pass = set()
+                for row in rows:
+                    if not self.auto_reply_active:
+                        break
+                    try:
+                        href = row.get_attribute('href')
+                    except Exception:
+                        continue
+                    if not href or '/t/' not in href:
+                        continue
+
+                    thread_id = href.split('/t/')[-1].split('/')[0].split('?')[0]
+                    if not thread_id or thread_id in seen_this_pass:
+                        continue
+                    seen_this_pass.add(thread_id)
+
+                    if thread_id in self.reply_state[profile_name]:
+                        continue  # ตอบ/ตรวจไปแล้ว ข้าม
+
+                    self.handle_one_conversation(profile_name, driver, href, thread_id, product_folders)
+                    self.random_sleep(3, 8)
+
+            except Exception as e:
+                self.update_status(f"{profile_name}: Error สแกนแชท - {str(e)[:80]}", "orange")
+
+            # พักก่อน scan รอบถัดไป — เช็คแฟล็กหยุดทุกวินาทีเพื่อให้กดหยุดแล้วตอบสนองไว
+            for _ in range(int(random.uniform(40, 80))):
+                if not self.auto_reply_active:
+                    break
+                time.sleep(1)
+
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        self.update_status(f"{profile_name}: ปิด Chrome แล้ว (หยุดตอบแชท)", "gray")
+
+    def handle_one_conversation(self, profile_name, driver, href, thread_id, product_folders):
+        """เปิดแชทเดี่ยว ตรวจว่าเป็นข้อความแรกจากลูกค้าหรือไม่ จับคู่สินค้า แล้วส่งข้อมูล"""
+        try:
+            driver.get(href)
+            self.wait_for_page_load(driver)
+            time.sleep(random.uniform(2, 4))
+
+            # หมายเหตุ: incoming_bubble นับแถวข้อความทั้งห้อง (ยังแยกฝั่งลูกค้า/เราไม่ได้ในตอนนี้)
+            # ใช้เป็นตัวกรองหยาบๆ ว่ายังไม่มีบทสนทนายาว ต้องปรับให้แม่นตอน live-test
+            incoming = self.find_all(driver, 'incoming_bubble')
+            if len(incoming) > 1:
+                return  # มีข้อความมากกว่า 1 แถวแล้ว ข้าม (กันไปตอบทับบทสนทนาที่คุยต่อแล้ว)
+
+            listing_el = self.find_first(driver, 'listing_title', wait=5)
+            listing_name = listing_el.text.strip() if listing_el else ""
+
+            matched_name = self.match_listing_to_folder(listing_name, product_folders)
+
+            if not matched_name:
+                self.reply_state[profile_name][thread_id] = {
+                    'product': listing_name or '(ไม่พบชื่อสินค้า)',
+                    'status': 'unmatched',
+                    'replied_at': time.strftime('%Y-%m-%d %H:%M'),
+                }
+                self.save_reply_settings()
+                self.root.after(0, self.update_reply_list)
+                self.update_status(f"{profile_name}: จับคู่สินค้าไม่ได้ - '{listing_name}' (ข้ามไว้ให้ส่งเอง)", "orange")
+                return
+
+            folder_info = product_folders[matched_name]
+            self.send_folder_content(driver, folder_info['main'])
+
+            self.reply_state[profile_name][thread_id] = {
+                'product': matched_name,
+                'status': 'replied',
+                'replied_at': time.strftime('%Y-%m-%d %H:%M'),
+            }
+            self.save_reply_settings()
+            self.root.after(0, self.update_reply_list)
+            self.update_status(f"{profile_name}: ตอบแชท '{matched_name}' แล้ว", "green")
+
+        except Exception as e:
+            self.update_status(f"{profile_name}: ตอบแชทไม่สำเร็จ - {str(e)[:80]}", "red")
+
+    def manual_send_category(self, category):
+        """ส่งโฟลเดอร์รีวิว(review)/เพิ่มเติม(extra) ให้แชทที่เลือกจากลิสต์ 'แชทที่ตอบไปแล้ว' ด้วยมือ
+        ต้องกำลังรัน 'เริ่มตอบแชทอัตโนมัติ' อยู่ (Chrome ของ Profile นั้นต้องยังเปิดค้างอยู่)"""
+        sel = self.reply_listbox.curselection()
+        if not sel:
+            messagebox.showwarning("คำเตือน", "กรุณาเลือกแชทจากรายการก่อน")
+            return
+        profile_name, thread_id = self._reply_list_index[sel[0]]
+        info = self.reply_state.get(profile_name, {}).get(thread_id)
+        if not info or info.get('status') != 'replied':
+            messagebox.showwarning("คำเตือน", "แชทนี้ยังไม่ได้จับคู่สินค้าสำเร็จ ส่งเพิ่มไม่ได้")
+            return
+
+        driver = self.reply_drivers.get(profile_name)
+        if not driver:
+            messagebox.showwarning("คำเตือน", f"Chrome ของ {profile_name} ไม่ได้เปิดอยู่ (ต้องกดเริ่มตอบแชทอัตโนมัติก่อน)")
+            return
+
+        product_folders = self.scan_product_folders(self.reply_root_folder)
+        folder_info = product_folders.get(info['product'])
+        if not folder_info:
+            messagebox.showwarning("คำเตือน", "ไม่พบโฟลเดอร์สินค้านี้แล้ว")
+            return
+
+        assets = folder_info.get(category)
+        if not assets:
+            messagebox.showwarning("คำเตือน", f"โฟลเดอร์ {category} ของสินค้านี้ไม่มี")
+            return
+
+        def worker():
+            try:
+                thread_href = f"https://www.facebook.com/marketplace/t/{thread_id}/"
+                driver.get(thread_href)
+                self.wait_for_page_load(driver)
+                time.sleep(random.uniform(2, 4))
+                self.send_folder_content(driver, assets)
+                self.update_status(f"{profile_name}: ส่ง {category} ให้ '{info['product']}' แล้ว", "green")
+            except Exception as e:
+                self.update_status(f"ส่ง {category} ไม่สำเร็จ: {str(e)[:80]}", "red")
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def run(self):
         self.root.mainloop()
 
