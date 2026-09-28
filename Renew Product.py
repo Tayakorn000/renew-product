@@ -17,6 +17,7 @@ import re
 import configparser
 import threading
 import json
+import base64
 import random
 
 class FacebookMarketplaceRenewer:
@@ -602,6 +603,18 @@ class FacebookMarketplaceRenewer:
             width=15
         )
         self.delete_btn.pack(side=tk.RIGHT)
+
+        self.manual_login_btn = tk.Button(
+            select_frame,
+            text="Login ด้วยมือ (บันทึก Cookie)",
+            command=self.open_manual_login_browser,
+            font=("Arial", 9),
+            bg="#42b72a",
+            fg="white",
+            cursor="hand2",
+            width=22
+        )
+        self.manual_login_btn.pack(side=tk.RIGHT, padx=(0, 5))
         
         # เพิ่ม Profile ใหม่
         add_frame = tk.LabelFrame(profile_frame, text="เพิ่ม Profile ใหม่", font=("Arial", 9), padx=10, pady=8)
@@ -833,9 +846,85 @@ class FacebookMarketplaceRenewer:
             
             self.save_settings()
             self.update_profile_list()
-            
+
             messagebox.showinfo("สำเร็จ", f"ลบ {deleted_count} Profile และโฟลเดอร์เรียบร้อยแล้ว")
-    
+
+    def open_manual_login_browser(self):
+        """เปิด Chrome จริงให้ผู้ใช้ Login มือ (ไม่พิมพ์ auto) แล้วบันทึก Cookies ลง .ini - เหมือน FBMKP"""
+        selected_indices = self.profile_listbox.curselection()
+
+        if not selected_indices:
+            messagebox.showwarning("คำเตือน", "กรุณาเลือก Profile ที่ต้องการ Login")
+            return
+
+        if len(selected_indices) > 1:
+            messagebox.showwarning("คำเตือน", "เลือก Login ด้วยมือได้ทีละ 1 Profile เท่านั้น")
+            return
+
+        profile_name = self.profile_listbox.get(selected_indices[0])
+        threading.Thread(target=self.run_manual_login_thread, args=(profile_name,), daemon=True).start()
+
+    def run_manual_login_thread(self, profile_name):
+        try:
+            self.manual_login_and_save_cookies(profile_name)
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("ผิดพลาด", f"Login ด้วยมือไม่สำเร็จ: {str(e)}"))
+
+    def manual_login_and_save_cookies(self, profile_name):
+        """เปิด Chrome ด้วย Profile ที่เลือก ให้ผู้ใช้ Login เองในหน้าต่างจริง แล้วบันทึก Cookie"""
+        profile_data = self.profiles[profile_name]
+        config_file_path = profile_data['config_file']
+        chrome_profile_dir = os.path.join(os.getcwd(), profile_data['chrome_profile'])
+
+        if not os.path.exists(chrome_profile_dir):
+            os.makedirs(chrome_profile_dir)
+
+        chrome_version = self._get_chrome_version()
+        self._clean_mismatched_chromedriver(chrome_version)
+
+        chrome_options = uc.ChromeOptions()
+        chrome_options.add_argument(f"--user-data-dir={chrome_profile_dir}")
+        chrome_options.add_argument("--profile-directory=Default")
+
+        self.update_status(f"{profile_name}: กำลังเปิด Chrome ให้ Login ด้วยมือ...", "blue")
+        driver = uc.Chrome(options=chrome_options, use_subprocess=True, version_main=chrome_version)
+
+        try:
+            driver.get("https://www.facebook.com/login")
+
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Login ด้วยตัวเอง",
+                f"กรุณา Login Facebook ในหน้าต่าง Chrome ที่เปิดขึ้น ({profile_name})\n\n"
+                "เสร็จแล้วกด OK ที่นี่เพื่อบันทึก Cookie"
+            ))
+
+            # รอจนกว่าจะออกจากหน้า login (ผู้ใช้ Login เสร็จ) สูงสุด 10 นาที
+            max_wait = 600
+            waited = 0
+            login_done = False
+            while waited < max_wait:
+                time.sleep(2)
+                waited += 2
+                try:
+                    current_url = driver.current_url
+                except Exception:
+                    break
+                if "facebook.com" in current_url and "login" not in current_url.lower():
+                    login_done = True
+                    break
+
+            if not login_done:
+                raise Exception("หมดเวลารอ Login (10 นาที) หรือ Browser ถูกปิดก่อน Login เสร็จ")
+
+            self._save_cookies_to_ini(driver, config_file_path, force=True)
+            self.update_status(f"{profile_name}: บันทึก Cookie สำเร็จ", "green")
+            self.root.after(0, lambda: messagebox.showinfo("สำเร็จ", f"บันทึก Cookie ของ {profile_name} แล้ว\nครั้งต่อไปไม่ต้อง Login ซ้ำ"))
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
     def start_renewal(self):
         selected_indices = self.profile_listbox.curselection()
         
@@ -1102,6 +1191,155 @@ class FacebookMarketplaceRenewer:
         except Exception as e:
             print(f"_clean_mismatched_chromedriver: {e}")
 
+    def _read_cookies_from_ini(self, ini_path):
+        """อ่านค่า Cookies จากไฟล์ .ini แบบ raw (ไม่ผ่าน configparser) เหมือน FBMKP"""
+        try:
+            with open(ini_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            match = re.search(
+                r'(?im)^\s*cookies\s*=\s*(.*?)(?=^\s*[a-zA-Z_]\w*\s*=|\[|\Z)',
+                content, re.MULTILINE | re.DOTALL
+            )
+            if match:
+                raw = match.group(1).strip()
+                return raw or None
+        except Exception:
+            pass
+        return None
+
+    def _parse_cookies_to_list(self, raw_cookies):
+        """แปลงค่า Cookies ที่อ่านจาก .ini ให้เป็น list of dict สำหรับ Selenium add_cookie
+        รองรับ: base64 JSON, JSON array/object ตรงๆ, หรือ cookie header string "key=value; key2=value2" """
+        if not raw_cookies:
+            return None
+
+        def _from_header(s):
+            cookies = []
+            for part in s.split(';'):
+                part = part.strip()
+                if '=' not in part:
+                    continue
+                name, _, value = part.partition('=')
+                name, value = name.strip(), value.strip()
+                if name:
+                    cookies.append({'name': name, 'value': value})
+            return cookies or None
+
+        def _normalize(raw):
+            raw = raw.strip()
+            try:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    return [{'name': k, 'value': v} for k, v in data.items()]
+            except Exception:
+                pass
+            if '=' in raw and ';' in raw:
+                return _from_header(raw)
+            return None
+
+        result = _normalize(raw_cookies)
+        if result:
+            return result
+
+        try:
+            decoded = base64.b64decode(raw_cookies.encode('ascii')).decode('utf-8')
+            result = _normalize(decoded)
+            if result:
+                return result
+        except Exception:
+            pass
+
+        return None
+
+    def _try_cookie_login(self, driver, cookies_raw, target_url):
+        """Inject Cookies เข้า driver แล้วเช็คว่า Login ผ่านไหม (เหมือน FBMKP แต่พอร์ตมาใช้กับ Selenium)"""
+        cookies_list = self._parse_cookies_to_list(cookies_raw)
+        if not cookies_list:
+            return False
+
+        # ต้องอยู่โดเมน facebook.com ก่อนถึงจะ add_cookie ได้ (ข้อจำกัดของ Selenium)
+        driver.get("https://www.facebook.com/")
+        time.sleep(1)
+
+        injected = 0
+        for c in cookies_list:
+            name = c.get('name')
+            value = c.get('value')
+            if not name or value is None:
+                continue
+
+            cookie = {
+                'name': name,
+                'value': value,
+                'domain': c.get('domain') or '.facebook.com',
+                'path': c.get('path') or '/',
+            }
+
+            expiry = c.get('expiry', c.get('expires'))
+            if isinstance(expiry, (int, float)) and expiry > 0:
+                cookie['expiry'] = int(expiry)
+
+            same_site = c.get('sameSite')
+            if same_site in ('Strict', 'Lax', 'None'):
+                cookie['sameSite'] = same_site
+
+            try:
+                driver.add_cookie(cookie)
+                injected += 1
+            except Exception:
+                continue
+
+        if injected == 0:
+            return False
+
+        driver.get(target_url)
+        time.sleep(random.uniform(3, 5))
+
+        try:
+            current_url = driver.current_url
+            if "login" in current_url.lower():
+                return False
+            if driver.find_elements(By.NAME, "email"):
+                return False
+        except Exception:
+            return False
+
+        return True
+
+    def _save_cookies_to_ini(self, driver, ini_path, force=False):
+        """บันทึก Cookies จาก Selenium driver ลงไฟล์ .ini section [FBAccount] (เหมือน FBMKP)
+        จะบันทึกเฉพาะเมื่อไฟล์ .ini ยังไม่มี Cookies เท่านั้น เว้นแต่ force=True (ใช้เมื่อ Cookie เก่าหมดอายุแล้ว login ใหม่สำเร็จ)"""
+        if not force:
+            existing = self._read_cookies_from_ini(ini_path)
+            if existing:
+                return
+
+        all_cookies = driver.get_cookies()
+        if not all_cookies:
+            return
+
+        cookies_json_str = json.dumps(all_cookies, ensure_ascii=False)
+        cookies_b64 = base64.b64encode(cookies_json_str.encode('utf-8')).decode('ascii')
+
+        with open(ini_path, 'r', encoding='utf-8') as f:
+            ini_content = f.read()
+
+        if re.search(r'(?im)^\s*cookies\s*=', ini_content):
+            ini_content = re.sub(
+                r'(?im)^\s*cookies\s*=.*?(?=^\s*[a-zA-Z_]\w*\s*=|\[|\Z)',
+                f'Cookies = {cookies_b64}\n',
+                ini_content, count=1, flags=re.MULTILINE | re.DOTALL
+            )
+        elif '[FBAccount]' in ini_content:
+            ini_content = ini_content.replace('[FBAccount]', f'[FBAccount]\nCookies = {cookies_b64}', 1)
+        else:
+            ini_content += f'\n[FBAccount]\nCookies = {cookies_b64}\n'
+
+        with open(ini_path, 'w', encoding='utf-8') as f:
+            f.write(ini_content)
+
     def open_and_login_profile(self, profile_name, target_url="https://www.facebook.com/marketplace/selling/renew_listings/"):
         """เปิด Chrome และล็อคอินจนถึงหน้าที่ระบุ (ค่าเริ่มต้น: หน้า Renew)"""
         driver = None
@@ -1129,9 +1367,12 @@ class FacebookMarketplaceRenewer:
                     user_id = config.get('FBAccount', 'UserID').strip()
                 if config.has_option('FBAccount', 'Password'):
                     password = config.get('FBAccount', 'Password').strip()
-            
-            if not user_id or not password:
-                raise Exception("ไฟล์ .ini ต้องมีข้อมูล UserID และ Password ใน section [FBAccount]")
+
+            # อ่าน Cookies แบบ raw เพื่อหลีกเลี่ยงปัญหา ; และ % ใน configparser (เหมือน FBMKP)
+            cookies_raw = self._read_cookies_from_ini(config_file_path)
+
+            if not (user_id and password) and not cookies_raw:
+                raise Exception("ไฟล์ .ini ต้องมีข้อมูล UserID และ Password หรือ Cookies ใน section [FBAccount]")
             
             # สร้างโฟลเดอร์ profile ถ้ายังไม่มี
             if not os.path.exists(chrome_profile_dir):
@@ -1266,11 +1507,25 @@ class FacebookMarketplaceRenewer:
                 # ถ้า error ให้ถือว่ายังไม่ได้ล็อคอิน (ปลอดภัยกว่า)
                 is_logged_in = False
                 self.update_status(f"{profile_name}: ไม่แน่ใจ กำลังลองล็อคอิน...", "orange")
-            
-            # ถ้ายังไม่ได้ล็อคอิน ให้ทำการล็อคอิน
+
+            # ถ้ายังไม่ได้ล็อคอิน ลอง Login ด้วย Cookie ก่อน (เหมือน FBMKP)
+            cookie_login_ok = False
+            if not is_logged_in and cookies_raw:
+                self.update_status(f"{profile_name}: กำลังลอง Login ด้วย Cookie...", "blue")
+                cookie_login_ok = self._try_cookie_login(driver, cookies_raw, target_url)
+                if cookie_login_ok:
+                    is_logged_in = True
+                    self.update_status(f"{profile_name}: Login ด้วย Cookie สำเร็จ", "green")
+                else:
+                    self.update_status(f"{profile_name}: Cookie หมดอายุหรือไม่ถูกต้อง", "orange")
+
+            # ถ้ายังไม่ได้ล็อคอิน ให้ทำการล็อคอินด้วย User/Password
             if not is_logged_in:
+                if not (user_id and password):
+                    raise Exception(f"Cookie ของ Profile '{profile_name}' หมดอายุ และไม่มี UserID/Password สำรอง - กรุณา Login ด้วยมือใหม่ (ปุ่ม \"Login ด้วยมือ (บันทึก Cookie)\")")
+
                 self.update_status(f"{profile_name}: กำลังล็อคอิน...", "blue")
-                
+
                 # รอให้ช่อง email ปรากฏ (ใช้ name="email" แทน ID)
                 email_field = WebDriverWait(driver, 15).until(
                     EC.element_to_be_clickable((By.NAME, "email"))
@@ -1442,7 +1697,13 @@ class FacebookMarketplaceRenewer:
                     self.update_status(f"{profile_name}: กลับไปหน้า Facebook หลัก...", "blue")
                     driver.get("https://www.facebook.com/")
                     time.sleep(3)
-            
+
+            # บันทึก Cookie ใหม่ไว้ใช้ครั้งต่อไป - เขียนทับเฉพาะตอน Cookie เดิมพิสูจน์แล้วว่าหมดอายุ
+            try:
+                self._save_cookies_to_ini(driver, config_file_path, force=bool(cookies_raw) and not cookie_login_ok)
+            except Exception:
+                pass
+
             # รอ 10-30 วินาทีก่อนไปหน้าต่ออายุ (Session Duration - ทำให้ดูเป็นธรรมชาติ)
             # ย้ายมาไว้หลังล็อคอินเสร็จแล้ว
             wait_before_renew = random.uniform(10, 30)
