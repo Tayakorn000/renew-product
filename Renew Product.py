@@ -644,7 +644,17 @@ class FacebookMarketplaceRenewer:
             cursor="hand2"
         )
         browse_btn.pack(side=tk.LEFT)
-        
+
+        # นำเข้าทั้งโฟลเดอร์ - สแกน .ini ทุกไฟล์ในโฟลเดอร์ เพิ่ม Profile ให้อัตโนมัติทีเดียว
+        import_folder_btn = tk.Button(
+            add_frame,
+            text="นำเข้าทั้งโฟลเดอร์ (.ini ทั้งหมด)",
+            command=self.import_ini_folder,
+            font=("Arial", 9),
+            cursor="hand2"
+        )
+        import_folder_btn.pack(pady=(3, 0))
+
         # ปุ่มเพิ่ม
         add_btn = tk.Button(
             add_frame,
@@ -813,7 +823,35 @@ class FacebookMarketplaceRenewer:
         self.update_profile_list()
         
         messagebox.showinfo("สำเร็จ", f"เพิ่ม Profile '{profile_name}' เรียบร้อยแล้ว")
-    
+
+    def import_ini_folder(self):
+        """สแกนทั้งโฟลเดอร์ หาไฟล์ .ini ทุกไฟล์ เพิ่มเป็น Profile ให้อัตโนมัติทีเดียว (ชื่อ Profile = ชื่อไฟล์)"""
+        folder = filedialog.askdirectory(title="เลือกโฟลเดอร์ที่มีไฟล์ .ini")
+        if not folder:
+            return
+
+        ini_files = sorted(f for f in os.listdir(folder) if f.lower().endswith('.ini'))
+        if not ini_files:
+            messagebox.showwarning("คำเตือน", "ไม่พบไฟล์ .ini ในโฟลเดอร์นี้")
+            return
+
+        added, skipped = 0, 0
+        for fname in ini_files:
+            profile_name = os.path.splitext(fname)[0]
+            if profile_name in self.profiles:
+                skipped += 1
+                continue
+            safe_profile_name = "".join(c if c.isalnum() or c in (' ', '_', '-') else '_' for c in profile_name)
+            self.profiles[profile_name] = {
+                'config_file': os.path.join(folder, fname),
+                'chrome_profile': f"chrome_profile_{safe_profile_name}"
+            }
+            added += 1
+
+        self.save_settings()
+        self.update_profile_list()
+        messagebox.showinfo("สำเร็จ", f"เพิ่ม Profile ใหม่ {added} รายการ (ข้าม {skipped} ที่มีอยู่แล้ว)")
+
     def delete_selected_profiles(self):
         """ลบ Profile ที่เลือก"""
         selected_indices = self.profile_listbox.curselection()
