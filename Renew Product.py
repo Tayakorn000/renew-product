@@ -615,7 +615,22 @@ class FacebookMarketplaceRenewer:
             width=22
         )
         self.manual_login_btn.pack(side=tk.RIGHT, padx=(0, 5))
-        
+
+        # แถวปุ่ม Auto Cookie Login
+        auto_login_frame = tk.Frame(list_frame)
+        auto_login_frame.pack(fill=tk.X, pady=(0, 3))
+
+        self.auto_cookie_login_btn = tk.Button(
+            auto_login_frame,
+            text="Login ด้วย Cookie อัตโนมัติ (Profile ที่เลือก)",
+            command=self.open_auto_cookie_login_browser,
+            font=("Arial", 9, "bold"),
+            bg="#FF9800",
+            fg="white",
+            cursor="hand2",
+        )
+        self.auto_cookie_login_btn.pack(fill=tk.X)
+
         # เพิ่ม Profile ใหม่
         add_frame = tk.LabelFrame(profile_frame, text="เพิ่ม Profile ใหม่", font=("Arial", 9), padx=10, pady=8)
         add_frame.pack(fill=tk.X, pady=5)
@@ -962,6 +977,157 @@ class FacebookMarketplaceRenewer:
                 driver.quit()
             except Exception:
                 pass
+
+    def open_auto_cookie_login_browser(self):
+        """เปิด Chrome อัตโนมัติสำหรับทุก Profile ที่เลือก แล้ว Login ด้วย Cookie จากไฟล์ .ini"""
+        selected_indices = self.profile_listbox.curselection()
+
+        if not selected_indices:
+            messagebox.showwarning("คำเตือน", "กรุณาเลือก Profile ที่ต้องการ Login ด้วย Cookie")
+            return
+
+        profile_names = [self.profile_listbox.get(i) for i in selected_indices]
+
+        # ตรวจว่าทุก Profile มี Cookie ในไฟล์ .ini
+        profiles_no_cookie = []
+        for pn in profile_names:
+            ini_path = self.profiles[pn].get('config_file', '')
+            if not ini_path or not os.path.exists(ini_path):
+                profiles_no_cookie.append(f"{pn} (ไม่พบไฟล์ .ini)")
+                continue
+            cookies_raw = self._read_cookies_from_ini(ini_path)
+            if not cookies_raw:
+                profiles_no_cookie.append(f"{pn} (ไม่มี Cookie ในไฟล์ .ini)")
+
+        if profiles_no_cookie:
+            messagebox.showwarning(
+                "บาง Profile ไม่มี Cookie",
+                "Profile ต่อไปนี้ไม่มี Cookie — ข้ามไป:\n\n" +
+                "\n".join(profiles_no_cookie) +
+                "\n\nใช้ปุ่ม 'Login ด้วยมือ (บันทึก Cookie)' เพื่อบันทึก Cookie ก่อน"
+            )
+            # กรองเฉพาะที่มี Cookie
+            profile_names = [
+                pn for pn in profile_names
+                if pn not in [p.split(" (")[0] for p in profiles_no_cookie]
+            ]
+            if not profile_names:
+                return
+
+        confirm = messagebox.askyesno(
+            "ยืนยัน",
+            f"จะเปิด Chrome และ Login ด้วย Cookie อัตโนมัติสำหรับ {len(profile_names)} Profile:\n\n" +
+            "\n".join(profile_names) +
+            "\n\nดำเนินการต่อ?"
+        )
+        if not confirm:
+            return
+
+        self.auto_cookie_login_btn.config(state=tk.DISABLED, bg="#9E9E9E", text="กำลัง Login...")
+        threading.Thread(
+            target=self.run_auto_cookie_login_thread,
+            args=(profile_names,),
+            daemon=True
+        ).start()
+
+    def run_auto_cookie_login_thread(self, profile_names):
+        """Thread wrapper สำหรับ auto cookie login หลาย Profile"""
+        try:
+            self.auto_cookie_login_profiles(profile_names)
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("ผิดพลาด", f"Cookie Login ไม่สำเร็จ: {str(e)}"))
+        finally:
+            self.root.after(0, lambda: self.auto_cookie_login_btn.config(
+                state=tk.NORMAL, bg="#FF9800",
+                text="Login ด้วย Cookie อัตโนมัติ (Profile ที่เลือก)"
+            ))
+
+    def auto_cookie_login_profiles(self, profile_names):
+        """เปิด Chrome ทีละ Profile แล้ว inject Cookie จาก .ini เพื่อ Login — ไม่ต้องพิมพ์ User/Password"""
+        total = len(profile_names)
+        results = []
+
+        for idx, profile_name in enumerate(profile_names, 1):
+            self.update_status(f"[{idx}/{total}] กำลัง Cookie Login: {profile_name}...", "blue")
+            driver = None
+            try:
+                profile_data = self.profiles[profile_name]
+                config_file_path = profile_data['config_file']
+                chrome_profile_dir = os.path.join(os.getcwd(), profile_data['chrome_profile'])
+
+                if not os.path.exists(config_file_path):
+                    raise Exception(f"ไม่พบไฟล์ .ini: {config_file_path}")
+
+                cookies_raw = self._read_cookies_from_ini(config_file_path)
+                if not cookies_raw:
+                    raise Exception("ไม่พบ Cookie ในไฟล์ .ini")
+
+                if not os.path.exists(chrome_profile_dir):
+                    os.makedirs(chrome_profile_dir)
+
+                chrome_version = self._get_chrome_version()
+                self._clean_mismatched_chromedriver(chrome_version)
+
+                # ตั้งค่า Chrome (ออกจากหน้าต่าง แต่ยังมี viewport ปกติ)
+                chrome_options = uc.ChromeOptions()
+                chrome_options.add_argument(f"--user-data-dir={chrome_profile_dir}")
+                chrome_options.add_argument("--profile-directory=Default")
+                chrome_options.add_argument("--window-size=1280,900")
+
+                driver = uc.Chrome(options=chrome_options, use_subprocess=True, version_main=chrome_version)
+
+                # inject fingerprint
+                try:
+                    self.add_human_behavior_scripts(driver)
+                    self.add_advanced_stealth_scripts(driver)
+                except Exception:
+                    pass
+
+                # ให้หน้าต่างแสดงบนจอ (ต่างจากโหมด Renew ที่ซ่อนออกนอกจอ)
+                driver.set_window_position(100, 100)
+
+                # inject cookies และตรวจ Login — ใช้หน้า Facebook หลัก ไม่ใช่หน้า renew
+                login_ok = self._try_cookie_login(driver, cookies_raw, "https://www.facebook.com/")
+
+                if login_ok:
+                    # อัปเดต Cookie ใหม่ (ถ้า session ต่ออายุ)
+                    self._save_cookies_to_ini(driver, config_file_path, force=True)
+                    self.update_status(f"[{idx}/{total}] {profile_name}: Cookie Login สำเร็จ", "green")
+                    results.append((profile_name, True, None))
+                    # ไม่ปิด driver — ให้หน้าต่าง Chrome ค้างอยู่ที่หน้า Facebook หลัก
+                    driver = None
+                else:
+                    raise Exception("Cookie หมดอายุหรือไม่ถูกต้อง — กรุณา Login ด้วยมือแล้วบันทึก Cookie ใหม่")
+
+            except Exception as e:
+                self.update_status(f"[{idx}/{total}] {profile_name}: {str(e)[:80]}", "red")
+                results.append((profile_name, False, str(e)))
+            finally:
+                # ปิด driver เฉพาะตอน error เท่านั้น (driver=None หมายถึง login สำเร็จ ไม่ต้องปิด)
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+
+            # หน่วงเวลาระหว่าง Profile เพื่อไม่ให้เปิดพร้อมกัน
+            if idx < total:
+                time.sleep(random.uniform(2, 4))
+
+        # สรุปผล
+        success = [r[0] for r in results if r[1]]
+        failed  = [(r[0], r[2]) for r in results if not r[1]]
+
+        summary_lines = [f"สำเร็จ {len(success)}/{total} Profile"]
+        if success:
+            summary_lines += [f"  • {n}" for n in success]
+        if failed:
+            summary_lines.append(f"\nล้มเหลว {len(failed)} Profile:")
+            summary_lines += [f"  • {n}: {e}" for n, e in failed]
+
+        summary = "\n".join(summary_lines)
+        self.root.after(0, lambda: messagebox.showinfo("ผลการ Cookie Login อัตโนมัติ", summary))
+        self.update_status(f"Cookie Login เสร็จ: สำเร็จ {len(success)}/{total}", "green" if not failed else "orange")
 
     def start_renewal(self):
         selected_indices = self.profile_listbox.curselection()
