@@ -1089,8 +1089,8 @@ class FacebookMarketplaceRenewer:
                 login_ok = self._try_cookie_login(driver, cookies_raw, "https://www.facebook.com/")
 
                 if login_ok:
-                    # อัปเดต Cookie ใหม่ (ถ้า session ต่ออายุ)
-                    self._save_cookies_to_ini(driver, config_file_path, force=True)
+                    # ไม่เขียนทับ Cookie เดิม — ถ้า inject ไม่ครบ จะทับของดีด้วยของที่ขาด
+                    # (.ini ของลูกค้าเป็นต้นฉบับชุดเดียว) เขียนทับเฉพาะตอน login ใหม่สำเร็จเท่านั้น
                     self.update_status(f"[{idx}/{total}] {profile_name}: Cookie Login สำเร็จ", "green")
                     results.append((profile_name, True, None))
                     # ไม่ปิด driver — ให้หน้าต่าง Chrome ค้างอยู่ที่หน้า Facebook หลัก
@@ -1456,6 +1456,37 @@ class FacebookMarketplaceRenewer:
 
         return None
 
+    def _build_selenium_cookie(self, c):
+        """แปลง cookie dict (ฟอร์แมต Playwright ของ FBMKP) เป็นฟอร์แมตที่ Selenium add_cookie รับ
+        ต้องส่ง secure ไปด้วย — Chrome ตีตก cookie ที่ SameSite=None แต่ไม่มี Secure
+        (xs / c_user ของ Facebook เป็นแบบนั้น ถ้าตกไปคือ login ไม่ติด)"""
+        name = c.get('name')
+        value = c.get('value')
+        if not name or value is None:
+            return None
+
+        cookie = {
+            'name': name,
+            'value': value,
+            'domain': c.get('domain') or '.facebook.com',
+            'path': c.get('path') or '/',
+            'secure': bool(c.get('secure', False)),
+            'httpOnly': bool(c.get('httpOnly', False)),
+        }
+
+        expiry = c.get('expiry', c.get('expires'))
+        if isinstance(expiry, (int, float)) and expiry > 0:
+            cookie['expiry'] = int(expiry)
+
+        same_site = c.get('sameSite')
+        if same_site in ('Strict', 'Lax', 'None'):
+            # SameSite=None บังคับต้อง Secure ไม่งั้น Chrome ตีตกทั้งตัว
+            if same_site == 'None':
+                cookie['secure'] = True
+            cookie['sameSite'] = same_site
+
+        return cookie
+
     def _try_cookie_login(self, driver, cookies_raw, target_url):
         """Inject Cookies เข้า driver แล้วเช็คว่า Login ผ่านไหม (เหมือน FBMKP แต่พอร์ตมาใช้กับ Selenium)"""
         cookies_list = self._parse_cookies_to_list(cookies_raw)
@@ -1466,35 +1497,36 @@ class FacebookMarketplaceRenewer:
         driver.get("https://www.facebook.com/")
         time.sleep(1)
 
-        injected = 0
+        rejected = []
         for c in cookies_list:
-            name = c.get('name')
-            value = c.get('value')
-            if not name or value is None:
+            cookie = self._build_selenium_cookie(c)
+            if not cookie:
                 continue
-
-            cookie = {
-                'name': name,
-                'value': value,
-                'domain': c.get('domain') or '.facebook.com',
-                'path': c.get('path') or '/',
-            }
-
-            expiry = c.get('expiry', c.get('expires'))
-            if isinstance(expiry, (int, float)) and expiry > 0:
-                cookie['expiry'] = int(expiry)
-
-            same_site = c.get('sameSite')
-            if same_site in ('Strict', 'Lax', 'None'):
-                cookie['sameSite'] = same_site
-
             try:
                 driver.add_cookie(cookie)
-                injected += 1
-            except Exception:
-                continue
+            except Exception as e:
+                rejected.append(f"{cookie['name']}: {str(e)[:60]}")
 
-        if injected == 0:
+        # เทียบว่า cookie ที่ตั้งใจใส่ เข้าไปจริงกี่ตัว — ตัวที่ Chrome ตีตกจะไม่โผล่
+        want = {c.get('name') for c in cookies_list if c.get('name')}
+        try:
+            got = {c['name'] for c in driver.get_cookies()}
+        except Exception:
+            got = set()
+        missing = sorted(want - got)
+        key_missing = [n for n in ('c_user', 'xs') if n in want and n not in got]
+
+        self.update_status(
+            f"Cookie: ใส่ได้ {len(want & got)}/{len(want)}" +
+            (f" | ขาด {', '.join(missing[:6])}" if missing else ""),
+            "orange" if missing else "blue"
+        )
+        if rejected:
+            print("cookie rejected:", "; ".join(rejected[:10]))
+        if key_missing:
+            print(f"cookie สำคัญหายไป: {key_missing} — Chrome ตีตก (เช็ค secure/sameSite)")
+
+        if not (want & got):
             return False
 
         driver.get(target_url)

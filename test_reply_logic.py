@@ -36,6 +36,23 @@ def test_match_no_match_returns_none():
     assert app.match_listing_to_folder("สนใจโซฟา", folders) is None
 
 
+def test_cookie_samesite_none_forces_secure():
+    # Chrome ตีตก SameSite=None ที่ไม่มี Secure — xs/c_user ของ Facebook เป็นแบบนี้
+    c = app._build_selenium_cookie({'name': 'xs', 'value': 'v', 'sameSite': 'None', 'secure': False})
+    assert c['secure'] is True
+    assert c['sameSite'] == 'None'
+
+
+def test_cookie_keeps_secure_and_httponly():
+    c = app._build_selenium_cookie({'name': 'c_user', 'value': '1', 'secure': True, 'httpOnly': True})
+    assert c['secure'] is True and c['httpOnly'] is True
+    assert c['domain'] == '.facebook.com' and c['path'] == '/'
+
+
+def test_cookie_skips_nameless():
+    assert app._build_selenium_cookie({'value': 'v'}) is None
+
+
 def test_split_text_to_messages():
     text = "ย่อหน้า 1\n\nย่อหน้า 2\n\n\nย่อหน้า 3"
     assert app.split_text_to_messages(text) == ["ย่อหน้า 1", "ย่อหน้า 2", "ย่อหน้า 3"]
@@ -64,6 +81,9 @@ if __name__ == "__main__":
     test_match_exact_one()
     test_match_ambiguous_returns_none()
     test_match_no_match_returns_none()
+    test_cookie_samesite_none_forces_secure()
+    test_cookie_keeps_secure_and_httponly()
+    test_cookie_skips_nameless()
     test_split_text_to_messages()
     test_scan_product_folders()
     print("OK")
