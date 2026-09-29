@@ -384,8 +384,7 @@ class FacebookMarketplaceRenewer:
             ]
             sw, sh, sah = random.choice(screen_configs)
 
-        # หน้าต่างจริงถูกย้ายออกนอกจอ (set_window_position(-2500, 0)) แต่ต้องปลอม
-        # window.screenX/Y ให้เป็นค่าที่คนจริงจะมี (อยู่ในจอ) ไม่งั้นค่าติดลบจะเป็นจุดสังเกตชัดเจน
+        # ปลอม window.screenX/Y ให้เป็นค่าสุ่มที่คนจริงจะมี (กันตรวจจับด้วยพิกัดคงที่ซ้ำทุก session)
         win_w, win_h = getattr(self, '_chosen_window_size', (sw, sah))
         fake_screen_x = random.randint(0, max(0, sw - win_w))
         fake_screen_y = random.randint(0, max(0, sah - win_h))
@@ -436,7 +435,7 @@ class FacebookMarketplaceRenewer:
                     Object.defineProperty(screen, 'colorDepth',  {{get: () => 24}});
                     Object.defineProperty(screen, 'pixelDepth',  {{get: () => 24}});
 
-                    // หน้าต่างจริงถูกย้ายออกนอกจอ - ปลอมตำแหน่งให้ดูเหมือนอยู่ในจอปกติ
+                    // ปลอมตำแหน่งหน้าต่างให้สุ่มต่างกันทุก session
                     Object.defineProperty(window, 'screenX',    {{get: () => {fake_screen_x}}});
                     Object.defineProperty(window, 'screenY',    {{get: () => {fake_screen_y}}});
                     Object.defineProperty(window, 'screenLeft', {{get: () => {fake_screen_x}}});
@@ -1653,9 +1652,8 @@ class FacebookMarketplaceRenewer:
             # รอสักครู่ก่อนย้ายหน้าต่าง (คนจริงเปิด Chrome แล้วจะเห็นหน้าต่างอยู่สักพัก)
             time.sleep(random.uniform(1.5, 3.0))
             
-            # ย้ายหน้าต่างออกนอกจอ (เพื่อให้ viewport ยังมีขนาดปกติ)
-            driver.set_window_position(-2500, 0)
-            
+            driver.set_window_position(100, 100)
+
             # inject fingerprint scripts ทันทีหลังเปิด Chrome
             # ต้อง inject ก่อนเปิดหน้าเว็บใดๆ เพื่อให้มีผลตั้งแต่หน้าแรก
             try:
@@ -1668,9 +1666,6 @@ class FacebookMarketplaceRenewer:
             wait_after_open = random.uniform(8, 15)
             self.update_status(f"{profile_name}: รอ {int(wait_after_open)} วินาทีหลังเปิด Chrome...", "blue")
             time.sleep(wait_after_open)
-            
-            # เก็บสถานะว่าหน้าต่างถูกย้ายออกนอกจอ
-            self.window_minimized = True
             
             # ตรวจสอบว่าล็อคอินอยู่แล้วหรือไม่
             driver.get("https://www.facebook.com/")
@@ -1939,13 +1934,6 @@ class FacebookMarketplaceRenewer:
             time.sleep(random.uniform(3, 5))
 
             self.update_status(f"{profile_name}: เข้าหน้า {target_url} สำเร็จ", "green")
-            
-            # ย้ายหน้าต่างออกนอกจอหลังเข้าหน้าต่ออายุสำเร็จ
-            try:
-                driver.set_window_position(-2500, 0)
-                self.window_minimized = True
-            except:
-                pass
             
             # ตรวจสอบอีกครั้งว่าเจอหน้า error หรือไม่
             current_url = driver.current_url
