@@ -942,7 +942,10 @@ class FacebookMarketplaceRenewer:
         driver = uc.Chrome(options=chrome_options, use_subprocess=True, version_main=chrome_version)
 
         try:
+            # หน่วงหลังเปิด Chrome ก่อนยิงเข้า Facebook (เปิดปุ๊บวิ่งปั๊บดูเป็นบอท)
+            time.sleep(random.uniform(5, 9))
             driver.get("https://www.facebook.com/login")
+            time.sleep(random.uniform(3, 6))
 
             self.root.after(0, lambda: messagebox.showinfo(
                 "Login ด้วยตัวเอง",
@@ -950,23 +953,41 @@ class FacebookMarketplaceRenewer:
                 "เสร็จแล้วกด OK ที่นี่เพื่อบันทึก Cookie"
             ))
 
-            # รอจนกว่าจะออกจากหน้า login (ผู้ใช้ Login เสร็จ) สูงสุด 10 นาที
+            # รอจนกว่าจะ Login เสร็จจริง สูงสุด 10 นาที
+            # ต้องผ่านหน้ายืนยันตัวตนให้หมดก่อน (checkpoint / ยืนยัน 2 ชั้น) ไม่งั้นได้ Cookie ครึ่งๆ กลางๆ
             max_wait = 600
             waited = 0
+            stable = 0
             login_done = False
             while waited < max_wait:
                 time.sleep(2)
                 waited += 2
                 try:
-                    current_url = driver.current_url
+                    current_url = driver.current_url.lower()
                 except Exception:
                     break
-                if "facebook.com" in current_url and "login" not in current_url.lower():
+
+                if "facebook.com" not in current_url:
+                    stable = 0
+                    continue
+
+                if self._is_login_pending_url(current_url):
+                    if stable:
+                        stable = 0
+                    self.update_status(f"{profile_name}: รอยืนยันตัวตนใน Chrome...", "orange")
+                    continue
+
+                # อยู่หน้าปกติแล้ว ต้องนิ่งติดกัน 3 รอบ (6 วินาที) ถึงนับว่าเสร็จจริง
+                stable += 1
+                if stable >= 3:
                     login_done = True
                     break
 
             if not login_done:
                 raise Exception("หมดเวลารอ Login (10 นาที) หรือ Browser ถูกปิดก่อน Login เสร็จ")
+
+            # เผื่อเวลาให้ Facebook ตั้ง Cookie ชุดสุดท้ายให้ครบก่อนบันทึก
+            time.sleep(random.uniform(3, 5))
 
             self._save_cookies_to_ini(driver, config_file_path, force=True)
             self.update_status(f"{profile_name}: บันทึก Cookie สำเร็จ", "green")
@@ -1086,7 +1107,7 @@ class FacebookMarketplaceRenewer:
                 driver.set_window_position(100, 100)
 
                 # inject cookies และตรวจ Login — ใช้หน้า Facebook หลัก ไม่ใช่หน้า renew
-                login_ok = self._try_cookie_login(driver, cookies_raw, "https://www.facebook.com/")
+                login_ok = self._try_cookie_login(driver, cookies_raw)
 
                 if login_ok:
                     # ไม่เขียนทับ Cookie เดิม — ถ้า inject ไม่ครบ จะทับของดีด้วยของที่ขาด
@@ -1456,6 +1477,13 @@ class FacebookMarketplaceRenewer:
 
         return None
 
+    def _is_login_pending_url(self, url):
+        """URL ที่ยังถือว่า Login ไม่เสร็จ — หน้า login เอง หรือหน้ายืนยันตัวตนของ Facebook"""
+        url = (url or "").lower()
+        pending = ('login', 'checkpoint', 'two_step_verification', 'confirmemail',
+                   'recover', 'authentication', 'challenge')
+        return any(p in url for p in pending)
+
     def _build_selenium_cookie(self, c):
         """แปลง cookie dict (ฟอร์แมต Playwright ของ FBMKP) เป็นฟอร์แมตที่ Selenium add_cookie รับ
         ต้องส่ง secure ไปด้วย — Chrome ตีตก cookie ที่ SameSite=None แต่ไม่มี Secure
@@ -1487,15 +1515,21 @@ class FacebookMarketplaceRenewer:
 
         return cookie
 
-    def _try_cookie_login(self, driver, cookies_raw, target_url):
+    def _try_cookie_login(self, driver, cookies_raw):
         """Inject Cookies เข้า driver แล้วเช็คว่า Login ผ่านไหม (เหมือน FBMKP แต่พอร์ตมาใช้กับ Selenium)"""
         cookies_list = self._parse_cookies_to_list(cookies_raw)
         if not cookies_list:
             return False
 
         # ต้องอยู่โดเมน facebook.com ก่อนถึงจะ add_cookie ได้ (ข้อจำกัดของ Selenium)
-        driver.get("https://www.facebook.com/")
-        time.sleep(1)
+        # ถ้าอยู่แล้วไม่ต้องโหลดซ้ำ — ผู้ใช้เห็นเป็นการรีเฟรชหน้าเปล่าๆ
+        try:
+            on_facebook = "facebook.com" in driver.current_url
+        except Exception:
+            on_facebook = False
+        if not on_facebook:
+            driver.get("https://www.facebook.com/")
+        time.sleep(random.uniform(1.5, 3.0))
 
         rejected = []
         for c in cookies_list:
@@ -1529,12 +1563,15 @@ class FacebookMarketplaceRenewer:
         if not (want & got):
             return False
 
-        driver.get(target_url)
-        time.sleep(random.uniform(3, 5))
+        # โหลดหน้าหลัก Facebook รอบเดียวเพื่อให้ Cookie มีผล แล้วเช็คว่าเข้าได้จริง
+        # (ไม่ยิงไปหน้าปลายทางตรงนี้ ปล่อยให้ตัวเรียกเดินทางแบบคนจริงต่อเอง)
+        time.sleep(random.uniform(1.0, 2.0))
+        driver.get("https://www.facebook.com/")
+        time.sleep(random.uniform(4, 7))
 
         try:
             current_url = driver.current_url
-            if "login" in current_url.lower():
+            if self._is_login_pending_url(current_url):
                 return False
             if driver.find_elements(By.NAME, "email"):
                 return False
@@ -1695,13 +1732,13 @@ class FacebookMarketplaceRenewer:
                 pass
             
             # รอหลังเปิด Chrome ก่อนเข้า Facebook — สุ่มให้ไม่เป็น pattern
-            wait_after_open = random.uniform(8, 15)
+            wait_after_open = random.uniform(14, 25)
             self.update_status(f"{profile_name}: รอ {int(wait_after_open)} วินาทีหลังเปิด Chrome...", "blue")
             time.sleep(wait_after_open)
-            
+
             # ตรวจสอบว่าล็อคอินอยู่แล้วหรือไม่
             driver.get("https://www.facebook.com/")
-            time.sleep(random.uniform(4, 7))  # รอแบบสุ่ม
+            time.sleep(random.uniform(6, 10))  # รอแบบสุ่ม
             
             # จำลองการอ่านหน้าเว็บ
             if random.random() < 0.4:  # 40% โอกาส
@@ -1743,7 +1780,7 @@ class FacebookMarketplaceRenewer:
             cookie_login_ok = False
             if not is_logged_in and cookies_raw:
                 self.update_status(f"{profile_name}: กำลังลอง Login ด้วย Cookie...", "blue")
-                cookie_login_ok = self._try_cookie_login(driver, cookies_raw, target_url)
+                cookie_login_ok = self._try_cookie_login(driver, cookies_raw)
                 if cookie_login_ok:
                     is_logged_in = True
                     self.update_status(f"{profile_name}: Login ด้วย Cookie สำเร็จ", "green")

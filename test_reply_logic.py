@@ -49,6 +49,16 @@ def test_cookie_keeps_secure_and_httponly():
     assert c['domain'] == '.facebook.com' and c['path'] == '/'
 
 
+def test_login_pending_url():
+    # หน้ายืนยันตัวตนต้องนับว่า login ยังไม่เสร็จ ไม่งั้นบันทึก Cookie ครึ่งๆ กลางๆ
+    assert app._is_login_pending_url("https://www.facebook.com/checkpoint/123") is True
+    assert app._is_login_pending_url("https://www.facebook.com/login") is True
+    assert app._is_login_pending_url("https://www.facebook.com/two_step_verification/x") is True
+    assert app._is_login_pending_url("https://www.facebook.com/") is False
+    assert app._is_login_pending_url("https://www.facebook.com/marketplace/inbox/") is False
+    assert app._is_login_pending_url("") is False
+
+
 def test_cookie_skips_nameless():
     assert app._build_selenium_cookie({'value': 'v'}) is None
 
@@ -83,6 +93,7 @@ if __name__ == "__main__":
     test_match_no_match_returns_none()
     test_cookie_samesite_none_forces_secure()
     test_cookie_keeps_secure_and_httponly()
+    test_login_pending_url()
     test_cookie_skips_nameless()
     test_split_text_to_messages()
     test_scan_product_folders()
