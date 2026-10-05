@@ -49,6 +49,22 @@ def test_cookie_keeps_secure_and_httponly():
     assert c['domain'] == '.facebook.com' and c['path'] == '/'
 
 
+def test_notify_text_names_the_profile():
+    # ลูกค้ามี 20 เฟส ข้อความต้องบอกให้ได้ว่ามาจากเฟสไหน
+    t = app.build_notify_text("ID7", "โช๊คหลัง PCX", "replied")
+    assert "ID7" in t and "โช๊คหลัง PCX" in t and "ตอบอัตโนมัติให้แล้ว" in t
+
+    t2 = app.build_notify_text("ID3", "", "unmatched", "โช้คหลัง PCX แต่งศูนย์")
+    assert "ID3" in t2 and "ต้องตอบเอง" in t2 and "โช้คหลัง PCX แต่งศูนย์" in t2
+
+
+def test_send_telegram_without_config_is_quiet():
+    app.telegram_token = ""
+    app.telegram_chat_id = ""
+    ok, err = app.send_telegram("x")
+    assert ok is False and "ยังไม่ได้ตั้งค่า" in err
+
+
 def test_login_pending_url():
     # หน้ายืนยันตัวตนต้องนับว่า login ยังไม่เสร็จ ไม่งั้นบันทึก Cookie ครึ่งๆ กลางๆ
     assert app._is_login_pending_url("https://www.facebook.com/checkpoint/123") is True
@@ -94,6 +110,8 @@ if __name__ == "__main__":
     test_cookie_samesite_none_forces_secure()
     test_cookie_keeps_secure_and_httponly()
     test_login_pending_url()
+    test_notify_text_names_the_profile()
+    test_send_telegram_without_config_is_quiet()
     test_cookie_skips_nameless()
     test_split_text_to_messages()
     test_scan_product_folders()

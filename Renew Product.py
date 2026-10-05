@@ -19,6 +19,8 @@ import threading
 import json
 import base64
 import random
+import urllib.request
+import urllib.parse
 
 class FacebookMarketplaceRenewer:
     IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
@@ -41,6 +43,8 @@ class FacebookMarketplaceRenewer:
         self.reply_settings_file = "reply_settings.json"
         self.reply_root_folder = None
         self.reply_state = {}  # {profile_name: {thread_id: {...}}}
+        self.telegram_token = ''
+        self.telegram_chat_id = ''
         self.auto_reply_active = False
         self.reply_drivers = {}  # profile_name -> driver ที่ยังเปิดอยู่ระหว่างตอบแชท
         self._reply_list_index = []  # index ของ reply_listbox -> (profile_name, thread_id)
@@ -519,13 +523,20 @@ class FacebookMarketplaceRenewer:
                     data = json.load(f)
                     self.reply_root_folder = data.get('root_folder')
                     self.reply_state = data.get('state', {})
+                    self.telegram_token = data.get('telegram_token', '')
+                    self.telegram_chat_id = data.get('telegram_chat_id', '')
         except Exception:
             pass
 
     def save_reply_settings(self):
         """บันทึกการตั้งค่าตอบแชทอัตโนมัติ"""
         try:
-            data = {'root_folder': self.reply_root_folder, 'state': self.reply_state}
+            data = {
+                'root_folder': self.reply_root_folder,
+                'state': self.reply_state,
+                'telegram_token': getattr(self, 'telegram_token', ''),
+                'telegram_chat_id': getattr(self, 'telegram_chat_id', ''),
+            }
             with open(self.reply_settings_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -725,6 +736,23 @@ class FacebookMarketplaceRenewer:
             state=tk.DISABLED, cursor="hand2", width=8
         )
         self.reply_stop_btn.pack(side=tk.RIGHT)
+
+        # แจ้งเตือนเข้า Telegram เวลามีลูกค้าทัก (บอกว่ามาจากเฟสไหน)
+        tg_row = tk.Frame(reply_frame)
+        tg_row.pack(fill=tk.X, pady=3)
+        tk.Label(tg_row, text="Telegram Token:", font=("Arial", 9), width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self.tg_token_entry = tk.Entry(tg_row, font=("Arial", 9), show="*")
+        self.tg_token_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.tg_token_entry.insert(0, self.telegram_token)
+
+        tg_row2 = tk.Frame(reply_frame)
+        tg_row2.pack(fill=tk.X, pady=3)
+        tk.Label(tg_row2, text="Chat ID:", font=("Arial", 9), width=14, anchor=tk.W).pack(side=tk.LEFT)
+        self.tg_chat_entry = tk.Entry(tg_row2, font=("Arial", 9))
+        self.tg_chat_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.tg_chat_entry.insert(0, self.telegram_chat_id)
+        tk.Button(tg_row2, text="บันทึก + ทดสอบส่ง", command=self.save_and_test_telegram,
+                  font=("Arial", 9), cursor="hand2").pack(side=tk.RIGHT)
 
         tk.Label(reply_frame, text="แชทที่ตอบไปแล้ว:", font=("Arial", 9, "bold")).pack(anchor=tk.W, pady=(5, 0))
         reply_list_frame = tk.Frame(reply_frame)
@@ -1476,6 +1504,70 @@ class FacebookMarketplaceRenewer:
             pass
 
         return None
+
+    def save_and_test_telegram(self):
+        """บันทึก Token/Chat ID แล้วยิงข้อความทดสอบ จะได้รู้ตั้งแต่ตอนตั้งค่าว่าใช้ได้ไหม"""
+        self.telegram_token = self.tg_token_entry.get().strip()
+        self.telegram_chat_id = self.tg_chat_entry.get().strip()
+        self.save_reply_settings()
+
+        if not self.telegram_token or not self.telegram_chat_id:
+            messagebox.showwarning("คำเตือน", "กรุณากรอก Telegram Token และ Chat ID ให้ครบ")
+            return
+
+        def _worker():
+            ok, err = self.send_telegram("ทดสอบการแจ้งเตือนจากโปรแกรมต่ออายุสินค้า Facebook")
+            if ok:
+                self.root.after(0, lambda: messagebox.showinfo("สำเร็จ", "ส่งข้อความทดสอบแล้ว เช็คใน Telegram ได้เลย"))
+            else:
+                self.root.after(0, lambda: messagebox.showerror("ส่งไม่สำเร็จ", f"ส่งข้อความทดสอบไม่ได้\n\n{err}"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def build_notify_text(self, profile_name, product, status, listing_name=""):
+        """ข้อความแจ้งเตือนลูกค้าทักเข้า — บอกว่ามาจากเฟสไหนเป็นอันดับแรก (ลูกค้ามี 20 เฟส)"""
+        lines = [
+            "มีลูกค้าทักมา",
+            f"เฟส: {profile_name}",
+            f"สินค้า: {product or '(ไม่รู้ชื่อสินค้า)'}",
+        ]
+        if status == 'replied':
+            lines.append("สถานะ: ตอบอัตโนมัติให้แล้ว")
+        else:
+            lines.append("สถานะ: ยังไม่ได้ตอบ จับคู่สินค้าไม่ได้ ต้องตอบเอง")
+            if listing_name:
+                lines.append(f"ชื่อประกาศ: {listing_name}")
+        lines.append(f"เวลา: {time.strftime('%d/%m/%Y %H:%M')}")
+        return "\n".join(lines)
+
+    def send_telegram(self, text):
+        """ยิงข้อความเข้า Telegram bot — ใช้ urllib (ไม่ต้องลง requests เพิ่มตอน build exe)
+        คืน (สำเร็จ, ข้อความ error) ไม่ throw เพราะห้ามให้แจ้งเตือนล้มแล้วลากการตอบแชทพังตาม"""
+        token = (getattr(self, 'telegram_token', '') or '').strip()
+        chat_id = (getattr(self, 'telegram_chat_id', '') or '').strip()
+        if not token or not chat_id:
+            return False, "ยังไม่ได้ตั้งค่า Token หรือ Chat ID"
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = urllib.parse.urlencode({'chat_id': chat_id, 'text': text}).encode('utf-8')
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=10) as resp:
+                return resp.status == 200, ""
+        except Exception as e:
+            return False, str(e)[:120]
+
+    def notify_new_chat(self, profile_name, product, status, listing_name=""):
+        """ส่งแจ้งเตือนแบบไม่บล็อก — การตอบแชทต้องเดินต่อได้แม้เน็ต Telegram ล่ม"""
+        if not (getattr(self, 'telegram_token', '') and getattr(self, 'telegram_chat_id', '')):
+            return
+        text = self.build_notify_text(profile_name, product, status, listing_name)
+
+        def _worker():
+            ok, err = self.send_telegram(text)
+            if not ok and err:
+                print(f"telegram แจ้งเตือนไม่สำเร็จ: {err}")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _is_login_pending_url(self, url):
         """URL ที่ยังถือว่า Login ไม่เสร็จ — หน้า login เอง หรือหน้ายืนยันตัวตนของ Facebook"""
@@ -2775,6 +2867,7 @@ class FacebookMarketplaceRenewer:
                 self.save_reply_settings()
                 self.root.after(0, self.update_reply_list)
                 self.update_status(f"{profile_name}: จับคู่สินค้าไม่ได้ - '{listing_name}' (ข้ามไว้ให้ส่งเอง)", "orange")
+                self.notify_new_chat(profile_name, listing_name, 'unmatched', listing_name)
                 return
 
             folder_info = product_folders[matched_name]
@@ -2788,6 +2881,7 @@ class FacebookMarketplaceRenewer:
             self.save_reply_settings()
             self.root.after(0, self.update_reply_list)
             self.update_status(f"{profile_name}: ตอบแชท '{matched_name}' แล้ว", "green")
+            self.notify_new_chat(profile_name, matched_name, 'replied')
 
         except Exception as e:
             self.update_status(f"{profile_name}: ตอบแชทไม่สำเร็จ - {str(e)[:80]}", "red")
