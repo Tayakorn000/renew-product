@@ -28,6 +28,10 @@ class FacebookMarketplaceRenewer:
     REVIEW_KEYWORDS = ['รีวิว']
     EXTRA_KEYWORDS = ['เพิ่มเติม']
 
+    # worker ของทุก Profile เขียน reply_settings.json ไฟล์เดียวกัน ต้องกันเขียนทับกันเอง
+    # ไม่มี lock = ไฟล์ขาดกลาง โหลดรอบหน้าไม่ขึ้น แล้วส่งข้อมูลหลักซ้ำให้ลูกค้าเก่าทุกคน
+    SETTINGS_LOCK = threading.Lock()
+
     # ลำดับโฟลเดอร์ที่ส่งตามหลัง main ทุกครั้งที่ลูกค้าทักกลับมา (stage 1 = ส่ง main ไปแล้ว)
     REPLY_STAGES = ['review', 'extra']
     STAGE_LABELS = {'review': 'รีวิวลูกค้า', 'extra': 'ข้อมูลเพิ่มเติม'}
@@ -542,14 +546,16 @@ class FacebookMarketplaceRenewer:
     def save_reply_settings(self):
         """บันทึกการตั้งค่าตอบแชทอัตโนมัติ"""
         try:
-            data = {
-                'root_folder': self.reply_root_folder,
-                'state': self.reply_state,
-                'telegram_token': getattr(self, 'telegram_token', ''),
-                'telegram_chat_id': getattr(self, 'telegram_chat_id', ''),
-            }
-            with open(self.reply_settings_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            with self.SETTINGS_LOCK:
+                data = {
+                    'root_folder': self.reply_root_folder,
+                    'state': {p: dict(threads) for p, threads in list(self.reply_state.items())},
+                    'telegram_token': getattr(self, 'telegram_token', ''),
+                    'telegram_chat_id': getattr(self, 'telegram_chat_id', ''),
+                }
+                text = json.dumps(data, ensure_ascii=False, indent=2)
+                with open(self.reply_settings_file, 'w', encoding='utf-8') as f:
+                    f.write(text)
         except Exception:
             pass
 
@@ -1548,6 +1554,8 @@ class FacebookMarketplaceRenewer:
             lines.append(f"สถานะ: ลูกค้าทักกลับมา ส่ง{self.STAGE_LABELS.get(listing_name, listing_name)}ให้แล้ว")
         elif status == 'followup_done':
             lines.append("สถานะ: ลูกค้าทักกลับมา ส่งข้อมูลครบทุกโฟลเดอร์แล้ว ต้องตอบเอง")
+        elif status == 'folder_missing':
+            lines.append("สถานะ: ลูกค้าทักกลับมา แต่หาโฟลเดอร์สินค้านี้ไม่เจอแล้ว ต้องตอบเอง")
         else:
             lines.append("สถานะ: ยังไม่ได้ตอบ จับคู่สินค้าไม่ได้ ต้องตอบเอง")
             if listing_name:
@@ -2946,9 +2954,7 @@ class FacebookMarketplaceRenewer:
     def handle_followup(self, profile_name, driver, thread_id, product_folders, info, row_key):
         """แชทที่ส่ง main ไปแล้วและลูกค้าทักกลับมา — ส่งโฟลเดอร์ถัดไปให้อัตโนมัติ
         คืน True ถ้าเปิดหน้าแชท (ให้ผู้เรียกหน่วงเวลาต่อ)"""
-        folder_info = product_folders.get(info.get('product')) or {}
-        available = {c for c in self.REPLY_STAGES if folder_info.get(c)}
-        category, new_stage, reason = self.next_reply_stage(info, row_key, available)
+        category, new_stage, reason = self.next_reply_stage(info, row_key)
 
         if reason == 'nochange' or reason == 'unmatched':
             if reason == 'unmatched':
@@ -2958,13 +2964,33 @@ class FacebookMarketplaceRenewer:
         if reason == 'baseline':
             info['row_key'] = row_key  # เก็บฐานเทียบไว้ก่อน ยังไม่ส่งอะไร
             self.save_reply_settings()
+            # พิมพ์คีย์ให้เห็นด้วย ใช้ยืนยันตอน live-test ว่าอ่าน preview ของแถวได้จริง
+            self.update_status(
+                f"{profile_name}: เฝ้าแชท '{info.get('product', '?')}' (คีย์ {row_key[:24] or 'ว่าง!'})", "gray")
             return False
 
         if reason == 'done':
             info['row_key'] = row_key
-            info['stage'] = new_stage
             self.save_reply_settings()
             self.update_status(f"{profile_name}: '{info.get('product', '?')}' ทักมาอีก (ส่งครบแล้ว ต้องตอบเอง)", "orange")
+            self.notify_new_chat(profile_name, info.get('product', ''), 'followup_done')
+            return False
+
+        folder_info = product_folders.get(info.get('product'))
+        if folder_info is None:
+            # โฟลเดอร์สินค้าถูกย้าย/เปลี่ยนชื่อไปแล้ว — ห้ามนับว่าส่งครบ ไม่งั้นแชทนี้ตายไปเลย
+            info['row_key'] = row_key
+            self.update_status(f"{profile_name}: ไม่เจอโฟลเดอร์ '{info.get('product', '?')}' แล้ว ต้องตอบเอง", "orange")
+            self.notify_new_chat(profile_name, info.get('product', ''), 'folder_missing')
+            return False
+
+        category, new_stage, reason = self.next_reply_stage(
+            info, row_key, {c for c in self.REPLY_STAGES if folder_info.get(c)})
+        if reason == 'done':
+            # มีโฟลเดอร์สินค้า แต่รีวิว/เพิ่มเติมไม่มีไฟล์ให้ส่ง
+            info['row_key'] = row_key
+            self.save_reply_settings()
+            self.update_status(f"{profile_name}: '{info.get('product', '?')}' ทักมาอีก (ไม่มีไฟล์ให้ส่งต่อ)", "orange")
             self.notify_new_chat(profile_name, info.get('product', ''), 'followup_done')
             return False
 

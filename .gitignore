@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 chrome_profile_*/
 reply_settings.json
+*.exe
+build/
+dist/
+*.spec
+.vscode/
