@@ -22,6 +22,16 @@ import random
 import urllib.request
 import urllib.parse
 
+# ค่าเริ่มต้นของบอทแจ้งเตือน ให้ exe มีมาในตัว ไม่ต้องให้ลูกค้ากรอก
+# อยู่ในไฟล์แยกที่ gitignore ไว้ — repo นี้ public ห้ามฝัง token ลงไฟล์ที่ขึ้น git
+# ไม่มีไฟล์นี้ = ช่องในโปรแกรมว่าง กรอกเองได้ตามปกติ
+try:
+    from telegram_default import TELEGRAM_TOKEN as DEFAULT_TELEGRAM_TOKEN
+    from telegram_default import TELEGRAM_CHAT_ID as DEFAULT_TELEGRAM_CHAT_ID
+except Exception:
+    DEFAULT_TELEGRAM_TOKEN = ''
+    DEFAULT_TELEGRAM_CHAT_ID = ''
+
 class FacebookMarketplaceRenewer:
     IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
     VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
@@ -58,8 +68,8 @@ class FacebookMarketplaceRenewer:
         self.reply_settings_file = "reply_settings.json"
         self.reply_root_folder = None
         self.reply_state = {}  # {profile_name: {thread_id: {...}}}
-        self.telegram_token = ''
-        self.telegram_chat_id = ''
+        self.telegram_token = DEFAULT_TELEGRAM_TOKEN
+        self.telegram_chat_id = DEFAULT_TELEGRAM_CHAT_ID
         self.auto_reply_active = False
         self.reply_drivers = {}  # profile_name -> driver ที่ยังเปิดอยู่ระหว่างตอบแชท
         self._reply_list_index = []  # index ของ reply_listbox -> (profile_name, thread_id)
@@ -538,8 +548,9 @@ class FacebookMarketplaceRenewer:
                     data = json.load(f)
                     self.reply_root_folder = data.get('root_folder')
                     self.reply_state = data.get('state', {})
-                    self.telegram_token = data.get('telegram_token', '')
-                    self.telegram_chat_id = data.get('telegram_chat_id', '')
+                    # ที่กรอกในโปรแกรมชนะค่าที่ฝังมากับ exe ลูกค้าเปลี่ยนเป็นบอทตัวเองได้
+                    self.telegram_token = data.get('telegram_token') or DEFAULT_TELEGRAM_TOKEN
+                    self.telegram_chat_id = data.get('telegram_chat_id') or DEFAULT_TELEGRAM_CHAT_ID
         except Exception:
             pass
 

@@ -26,6 +26,17 @@ pyinstaller --onefile --windowed --name "Renew Product" "Renew Product.py"
 
 เวลามีลูกค้าทักเข้ามา โปรแกรมยิงแจ้งเตือนเข้า Telegram ได้ บอกว่ามาจากเฟสไหน สินค้าอะไร ตอบไปหรือยัง
 
+exe ที่ build จากเครื่องที่มีไฟล์ `telegram_default.py` จะมีบอทติดมาในตัว เปิดมาช่อง Token/Chat ID มีค่าอยู่แล้ว
+ไฟล์นั้น gitignore ไว้ (repo นี้ public ห้ามมี token) ถ้า clone มา build เองจะไม่มี ต้องกรอกเอง:
+
+```python
+# telegram_default.py
+TELEGRAM_TOKEN = "123456:AA..."
+TELEGRAM_CHAT_ID = "7017153301"
+```
+
+ค่าที่กรอกในโปรแกรมชนะค่าที่ฝังมา เปลี่ยนเป็นบอทตัวเองได้ตลอด
+
 ตั้งค่าครั้งเดียว:
 
 1. ทัก [@BotFather](https://t.me/BotFather) ใน Telegram พิมพ์ `/newbot` ตั้งชื่อบอท จะได้ Token มา
