@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
 chrome_profile_*/
+reply_settings.json

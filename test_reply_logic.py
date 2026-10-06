@@ -79,6 +79,45 @@ def test_cookie_skips_nameless():
     assert app._build_selenium_cookie({'value': 'v'}) is None
 
 
+def test_inbox_row_key_ignores_relative_time():
+    # เวลาใน preview ขยับเอง ("2 นาที" -> "5 นาที") ห้ามนับว่าลูกค้าทักใหม่
+    a = app.inbox_row_key("สมชาย\nโช๊คหลัง PCX\nคุณ: ราคา 1200 บาท\n2 นาที")
+    b = app.inbox_row_key("สมชาย\nโช๊คหลัง PCX\nคุณ: ราคา 1200 บาท\n5 นาที")
+    assert a == b
+    c = app.inbox_row_key("สมชาย\nโช๊คหลัง PCX\nสนใจครับ\n1 นาที")
+    assert c != a
+
+
+def test_followup_backfill_sends_nothing():
+    # รอบแรกหลังอัปเดตโปรแกรม ประวัติเก่าไม่มี row_key — ห้ามยิงรีวิวใส่ลูกค้าเก่าทุกคนพร้อมกัน
+    info = {'product': 'โช๊คหลัง PCX', 'status': 'replied'}
+    assert app.next_reply_stage(info, "abc") == (None, None, 'baseline')
+
+
+def test_followup_no_change_sends_nothing():
+    info = {'status': 'replied', 'stage': 1, 'row_key': 'abc'}
+    assert app.next_reply_stage(info, "abc") == (None, None, 'nochange')
+
+
+def test_followup_advances_stages_then_stops():
+    info = {'status': 'replied', 'stage': 1, 'row_key': 'old'}
+    assert app.next_reply_stage(info, "new") == ('review', 2, 'send')
+    assert app.next_reply_stage({**info, 'stage': 2}, "new") == ('extra', 3, 'send')
+    assert app.next_reply_stage({**info, 'stage': 3}, "new")[2] == 'done'
+
+
+def test_followup_skips_missing_folder():
+    # ไม่มีโฟลเดอร์รีวิว ให้ข้ามไปส่งข้อมูลเพิ่มเติมเลย
+    info = {'status': 'replied', 'stage': 1, 'row_key': 'old'}
+    assert app.next_reply_stage(info, "new", available={'extra'}) == ('extra', 3, 'send')
+    assert app.next_reply_stage(info, "new", available=set())[2] == 'done'
+
+
+def test_followup_skips_unmatched_thread():
+    info = {'status': 'unmatched', 'row_key': 'old'}
+    assert app.next_reply_stage(info, "new") == (None, None, 'unmatched')
+
+
 def test_split_text_to_messages():
     text = "ย่อหน้า 1\n\nย่อหน้า 2\n\n\nย่อหน้า 3"
     assert app.split_text_to_messages(text) == ["ย่อหน้า 1", "ย่อหน้า 2", "ย่อหน้า 3"]
@@ -113,6 +152,12 @@ if __name__ == "__main__":
     test_notify_text_names_the_profile()
     test_send_telegram_without_config_is_quiet()
     test_cookie_skips_nameless()
+    test_inbox_row_key_ignores_relative_time()
+    test_followup_backfill_sends_nothing()
+    test_followup_no_change_sends_nothing()
+    test_followup_advances_stages_then_stops()
+    test_followup_skips_missing_folder()
+    test_followup_skips_unmatched_thread()
     test_split_text_to_messages()
     test_scan_product_folders()
     print("OK")
