@@ -88,6 +88,27 @@ def test_inbox_row_key_ignores_relative_time():
     assert c != a
 
 
+def test_preview_message_reads_what_customer_typed():
+    assert app.preview_message("สมชาย\nโช๊คหลัง PCX\nจ่ายปลายทางได้มั้ย · 2 นาที") == "จ่ายปลายทางได้มั้ย"
+    # บางธีมเวลาอยู่บรรทัดแยก
+    assert app.preview_message("สมชาย\nโช๊คหลัง PCX\nมีสีดำมั้ยครับ\n5 นาที") == "มีสีดำมั้ยครับ"
+
+
+def test_preview_message_skips_our_own_message():
+    # ข้อความล่าสุดเป็นของเราเอง ห้ามแปะว่า "ลูกค้าพิมพ์"
+    assert app.preview_message("สมชาย\nโช๊คหลัง PCX\nคุณ: ราคา 1200 บาทครับ · 1 นาที") == ""
+    assert app.preview_message("John\nPCX shock\nYou: sent a photo · 1m") == ""
+    assert app.preview_message("") == ""
+    assert app.preview_message("สมชาย\n2 นาที") == "สมชาย"
+
+
+def test_notify_text_includes_customer_message():
+    t = app.build_notify_text("ID7", "โช๊คหลัง PCX", "followup", "review", message="จ่ายปลายทางได้มั้ย")
+    assert "ลูกค้าพิมพ์: จ่ายปลายทางได้มั้ย" in t and "ID7" in t
+    # ไม่มีข้อความก็ไม่ต้องมีบรรทัดเปล่า
+    assert "ลูกค้าพิมพ์" not in app.build_notify_text("ID7", "x", "replied")
+
+
 def test_followup_backfill_sends_nothing():
     # รอบแรกหลังอัปเดตโปรแกรม ประวัติเก่าไม่มี row_key — ห้ามยิงรีวิวใส่ลูกค้าเก่าทุกคนพร้อมกัน
     info = {'product': 'โช๊คหลัง PCX', 'status': 'replied'}
@@ -153,6 +174,9 @@ if __name__ == "__main__":
     test_send_telegram_without_config_is_quiet()
     test_cookie_skips_nameless()
     test_inbox_row_key_ignores_relative_time()
+    test_preview_message_reads_what_customer_typed()
+    test_preview_message_skips_our_own_message()
+    test_notify_text_includes_customer_message()
     test_followup_backfill_sends_nothing()
     test_followup_no_change_sends_nothing()
     test_followup_advances_stages_then_stops()

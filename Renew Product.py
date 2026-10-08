@@ -46,6 +46,9 @@ class FacebookMarketplaceRenewer:
     REPLY_STAGES = ['review', 'extra']
     STAGE_LABELS = {'review': 'รีวิวลูกค้า', 'extra': 'ข้อมูลเพิ่มเติม'}
 
+    # FB เติมคำนำหน้าใน preview เมื่อข้อความล่าสุดเป็นของเราเอง
+    PREVIEW_SELF_PREFIXES = ('คุณ:', 'you:')
+
     # ตัวเลข/คำบอกเวลาใน preview ของแถว inbox ("2 นาที", "6 ต.ค.") ขยับเองแม้ไม่มีข้อความใหม่
     # ตัดออกก่อนเทียบ — ตัดเกินดีกว่าตัดขาด เพราะตัดขาด = ส่งรีวิวทับลูกค้าที่ไม่ได้ทักอะไร
     ROW_TIME_NOISE = re.compile(
@@ -1552,13 +1555,15 @@ class FacebookMarketplaceRenewer:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def build_notify_text(self, profile_name, product, status, listing_name=""):
+    def build_notify_text(self, profile_name, product, status, listing_name="", message=""):
         """ข้อความแจ้งเตือนลูกค้าทักเข้า — บอกว่ามาจากเฟสไหนเป็นอันดับแรก (ลูกค้ามี 20 เฟส)"""
         lines = [
             "มีลูกค้าทักมา",
             f"เฟส: {profile_name}",
             f"สินค้า: {product or '(ไม่รู้ชื่อสินค้า)'}",
         ]
+        if message:
+            lines.append(f"ลูกค้าพิมพ์: {message}")
         if status == 'replied':
             lines.append("สถานะ: ตอบอัตโนมัติให้แล้ว")
         elif status == 'followup':
@@ -1567,6 +1572,8 @@ class FacebookMarketplaceRenewer:
             lines.append("สถานะ: ลูกค้าทักกลับมา ส่งข้อมูลครบทุกโฟลเดอร์แล้ว ต้องตอบเอง")
         elif status == 'folder_missing':
             lines.append("สถานะ: ลูกค้าทักกลับมา แต่หาโฟลเดอร์สินค้านี้ไม่เจอแล้ว ต้องตอบเอง")
+        elif status == 'unmatched_again':
+            lines.append("สถานะ: ลูกค้าทักมาอีก จับคู่สินค้าไม่ได้ตั้งแต่แรก ต้องตอบเอง")
         else:
             lines.append("สถานะ: ยังไม่ได้ตอบ จับคู่สินค้าไม่ได้ ต้องตอบเอง")
             if listing_name:
@@ -1590,11 +1597,11 @@ class FacebookMarketplaceRenewer:
         except Exception as e:
             return False, str(e)[:120]
 
-    def notify_new_chat(self, profile_name, product, status, listing_name=""):
+    def notify_new_chat(self, profile_name, product, status, listing_name="", message=""):
         """ส่งแจ้งเตือนแบบไม่บล็อก — การตอบแชทต้องเดินต่อได้แม้เน็ต Telegram ล่ม"""
         if not (getattr(self, 'telegram_token', '') and getattr(self, 'telegram_chat_id', '')):
             return
-        text = self.build_notify_text(profile_name, product, status, listing_name)
+        text = self.build_notify_text(profile_name, product, status, listing_name, message)
 
         def _worker():
             ok, err = self.send_telegram(text)
@@ -2605,6 +2612,26 @@ class FacebookMarketplaceRenewer:
         """คีย์สำหรับเทียบว่าแถว inbox มีข้อความใหม่เข้ามาไหม (ตัดตัวเลขกับคำบอกเวลาออก)"""
         return self.ROW_TIME_NOISE.sub('', (text or '').lower())
 
+    def preview_message(self, row_text):
+        """ดึงข้อความล่าสุดที่เห็นใน preview ของแถว inbox เอาไปแปะในแจ้งเตือน
+        คืน "" ถ้าข้อความล่าสุดเป็นของเราเอง หรืออ่านไม่ออก — ห้ามเดา ถ้าไม่ชัวร์ก็ไม่ต้องแปะ
+        หมายเหตุ: FB ตัดข้อความยาวด้วย … ที่ได้อาจไม่ใช่ประโยคเต็ม"""
+        lines = [ln.strip() for ln in (row_text or '').split('\n') if ln.strip()]
+        if not lines:
+            return ""
+        last = lines[-1]
+        # บางธีมเอาเวลาไว้บรรทัดสุดท้ายแยกเดี่ยวๆ ("2 นาที") ถ้าเหลือแต่ noise ให้ถอยไปบรรทัดก่อนหน้า
+        if not self.ROW_TIME_NOISE.sub('', last) and len(lines) > 1:
+            last = lines[-2]
+        # ตัดเวลาที่ห้อยท้ายบรรทัดเดียวกัน ("จ่ายปลายทางได้มั้ย · 2 นาที")
+        last = re.split(r'\s*[·•]\s*', last)[0].strip()
+        if not self.ROW_TIME_NOISE.sub('', last):
+            return ""
+        low = last.lower()
+        if any(low.startswith(p) for p in self.PREVIEW_SELF_PREFIXES):
+            return ""
+        return last
+
     def next_reply_stage(self, info, row_key, available=None):
         """ตัดสินว่าแชทที่ตอบ main ไปแล้ว ควรส่งโฟลเดอร์อะไรต่อ เมื่อลูกค้าทักกลับมา
         available = ชุดชื่อโฟลเดอร์ที่มีไฟล์จริงของสินค้านั้น (None = ถือว่ามีครบ)
@@ -2874,9 +2901,11 @@ class FacebookMarketplaceRenewer:
                 for row in self.find_all(driver, 'conversation_row'):
                     try:
                         href = row.get_attribute('href')
-                        row_key = self.inbox_row_key(row.text)
+                        row_text = row.text
                     except Exception:
                         continue
+                    row_key = self.inbox_row_key(row_text)
+                    preview = self.preview_message(row_text)
                     if not href or '/t/' not in href:
                         continue
 
@@ -2884,15 +2913,15 @@ class FacebookMarketplaceRenewer:
                     if not thread_id or thread_id in seen_this_pass:
                         continue
                     seen_this_pass.add(thread_id)
-                    pending.append((thread_id, href, row_key))
+                    pending.append((thread_id, href, row_key, preview))
 
-                for thread_id, href, row_key in pending:
+                for thread_id, href, row_key, preview in pending:
                     if not self.auto_reply_active:
                         break
                     info = self.reply_state[profile_name].get(thread_id)
                     if info is None:
                         self.handle_one_conversation(profile_name, driver, href, thread_id, product_folders, row_key)
-                    elif not self.handle_followup(profile_name, driver, thread_id, product_folders, info, row_key):
+                    elif not self.handle_followup(profile_name, driver, thread_id, product_folders, info, row_key, preview):
                         continue  # ไม่มีอะไรใหม่ ไม่ได้เปิดหน้าไหน ไม่ต้องหน่วงเวลา
                     self.random_sleep(3, 8)
 
@@ -2962,14 +2991,22 @@ class FacebookMarketplaceRenewer:
         except Exception as e:
             self.update_status(f"{profile_name}: ตอบแชทไม่สำเร็จ - {str(e)[:80]}", "red")
 
-    def handle_followup(self, profile_name, driver, thread_id, product_folders, info, row_key):
+    def handle_followup(self, profile_name, driver, thread_id, product_folders, info, row_key, preview=""):
         """แชทที่ส่ง main ไปแล้วและลูกค้าทักกลับมา — ส่งโฟลเดอร์ถัดไปให้อัตโนมัติ
         คืน True ถ้าเปิดหน้าแชท (ให้ผู้เรียกหน่วงเวลาต่อ)"""
         category, new_stage, reason = self.next_reply_stage(info, row_key)
 
-        if reason == 'nochange' or reason == 'unmatched':
-            if reason == 'unmatched':
-                info['row_key'] = row_key
+        if reason == 'nochange':
+            return False
+
+        if reason == 'unmatched':
+            # จับคู่สินค้าไม่ได้ ไม่เคยส่งอะไรให้ แต่ลูกค้าพิมพ์มาอีกต้องรู้
+            changed = info.get('row_key') is not None and info.get('row_key') != row_key
+            info['row_key'] = row_key
+            if changed:
+                self.save_reply_settings()
+                self.update_status(f"{profile_name}: '{info.get('product', '?')}' ทักมาอีก (ยังต้องตอบเอง)", "orange")
+                self.notify_new_chat(profile_name, info.get('product', ''), 'unmatched_again', message=preview)
             return False
 
         if reason == 'baseline':
@@ -2984,7 +3021,7 @@ class FacebookMarketplaceRenewer:
             info['row_key'] = row_key
             self.save_reply_settings()
             self.update_status(f"{profile_name}: '{info.get('product', '?')}' ทักมาอีก (ส่งครบแล้ว ต้องตอบเอง)", "orange")
-            self.notify_new_chat(profile_name, info.get('product', ''), 'followup_done')
+            self.notify_new_chat(profile_name, info.get('product', ''), 'followup_done', message=preview)
             return False
 
         folder_info = product_folders.get(info.get('product'))
@@ -2992,7 +3029,7 @@ class FacebookMarketplaceRenewer:
             # โฟลเดอร์สินค้าถูกย้าย/เปลี่ยนชื่อไปแล้ว — ห้ามนับว่าส่งครบ ไม่งั้นแชทนี้ตายไปเลย
             info['row_key'] = row_key
             self.update_status(f"{profile_name}: ไม่เจอโฟลเดอร์ '{info.get('product', '?')}' แล้ว ต้องตอบเอง", "orange")
-            self.notify_new_chat(profile_name, info.get('product', ''), 'folder_missing')
+            self.notify_new_chat(profile_name, info.get('product', ''), 'folder_missing', message=preview)
             return False
 
         category, new_stage, reason = self.next_reply_stage(
@@ -3002,7 +3039,7 @@ class FacebookMarketplaceRenewer:
             info['row_key'] = row_key
             self.save_reply_settings()
             self.update_status(f"{profile_name}: '{info.get('product', '?')}' ทักมาอีก (ไม่มีไฟล์ให้ส่งต่อ)", "orange")
-            self.notify_new_chat(profile_name, info.get('product', ''), 'followup_done')
+            self.notify_new_chat(profile_name, info.get('product', ''), 'followup_done', message=preview)
             return False
 
         try:
@@ -3021,7 +3058,7 @@ class FacebookMarketplaceRenewer:
         self.root.after(0, self.update_reply_list)
         label = self.STAGE_LABELS.get(category, category)
         self.update_status(f"{profile_name}: ส่ง{label}ให้ '{info.get('product', '?')}' อัตโนมัติแล้ว", "green")
-        self.notify_new_chat(profile_name, info.get('product', ''), 'followup', category)
+        self.notify_new_chat(profile_name, info.get('product', ''), 'followup', category, message=preview)
         return True
 
     def manual_send_category(self, category):
