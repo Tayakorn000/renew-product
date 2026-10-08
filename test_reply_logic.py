@@ -134,6 +134,20 @@ def test_followup_skips_missing_folder():
     assert app.next_reply_stage(info, "new", available=set())[2] == 'done'
 
 
+def test_stage_toggle_skips_disabled_folder():
+    # ปิด "รีวิวสินค้า" ไว้ ลูกค้าทักกลับมาต้องข้ามไปส่งรูปภาพเพิ่มเติมเลย
+    info = {'status': 'replied', 'stage': 1, 'row_key': 'old'}
+    assert app.next_reply_stage(info, "new", available={'extra'}) == ('extra', 3, 'send')
+    # ปิดทั้งสองอัน = ไม่ส่งอะไรต่อ แจ้งเตือนอย่างเดียว
+    assert app.next_reply_stage(info, "new", available=set())[2] == 'done'
+
+
+def test_stage_labels_cover_every_stage():
+    # GUI สร้าง checkbox จาก ALL_STAGES ถ้าขาด label จะ KeyError ตอนเปิดโปรแกรม
+    assert set(App.ALL_STAGES) == set(App.STAGE_LABELS)
+    assert App.ALL_STAGES[0] == 'main'
+
+
 def test_followup_skips_unmatched_thread():
     info = {'status': 'unmatched', 'row_key': 'old'}
     assert app.next_reply_stage(info, "new") == (None, None, 'unmatched')
@@ -181,6 +195,8 @@ if __name__ == "__main__":
     test_followup_no_change_sends_nothing()
     test_followup_advances_stages_then_stops()
     test_followup_skips_missing_folder()
+    test_stage_toggle_skips_disabled_folder()
+    test_stage_labels_cover_every_stage()
     test_followup_skips_unmatched_thread()
     test_split_text_to_messages()
     test_scan_product_folders()
