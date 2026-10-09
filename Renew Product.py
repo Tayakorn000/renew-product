@@ -46,6 +46,9 @@ class FacebookMarketplaceRenewer:
     REPLY_STAGES = ['review', 'extra']
     STAGE_LABELS = {'main': 'แชทหลัก', 'review': 'รีวิวสินค้า', 'extra': 'รูปภาพเพิ่มเติม'}
     ALL_STAGES = ['main'] + REPLY_STAGES
+    # ค่าเริ่มต้น: ทักครั้งแรกตอบข้อมูลหลักให้ ทักกลับมาถามอะไรแค่แจ้งเตือน ไม่ตอบเอง
+    # (ลูกค้าถาม "จ่ายปลายทางได้มั้ย" แล้วโดนยิงรีวิวกลับ = ไม่ตอบคำถาม) ติ๊กเปิดเองได้
+    DEFAULT_STAGE_ENABLED = {'main': True, 'review': False, 'extra': False}
 
     # FB เติมคำนำหน้าใน preview เมื่อข้อความล่าสุดเป็นของเราเอง
     PREVIEW_SELF_PREFIXES = ('คุณ:', 'you:')
@@ -73,7 +76,7 @@ class FacebookMarketplaceRenewer:
         self.reply_root_folder = None
         self.reply_state = {}  # {profile_name: {thread_id: {...}}}
         # โฟลเดอร์ไหนให้ตอบออโต้บ้าง (ติ๊กใน GUI) — ปิดอันไหน ออโต้ข้ามอันนั้น ส่งด้วยมือได้เหมือนเดิม
-        self.stage_enabled = {c: True for c in self.ALL_STAGES}
+        self.stage_enabled = dict(self.DEFAULT_STAGE_ENABLED)
         self.telegram_token = DEFAULT_TELEGRAM_TOKEN
         self.telegram_chat_id = DEFAULT_TELEGRAM_CHAT_ID
         self.auto_reply_active = False
@@ -558,7 +561,8 @@ class FacebookMarketplaceRenewer:
                     self.telegram_token = data.get('telegram_token') or DEFAULT_TELEGRAM_TOKEN
                     self.telegram_chat_id = data.get('telegram_chat_id') or DEFAULT_TELEGRAM_CHAT_ID
                     saved_stages = data.get('stage_enabled') or {}
-                    self.stage_enabled = {c: bool(saved_stages.get(c, True)) for c in self.ALL_STAGES}
+                    self.stage_enabled = {
+                        c: bool(saved_stages.get(c, self.DEFAULT_STAGE_ENABLED[c])) for c in self.ALL_STAGES}
         except Exception:
             pass
 
@@ -1602,6 +1606,8 @@ class FacebookMarketplaceRenewer:
             lines.append("สถานะ: ลูกค้าทักมาอีก จับคู่สินค้าไม่ได้ตั้งแต่แรก ต้องตอบเอง")
         elif status == 'main_off':
             lines.append("สถานะ: ปิดตอบออโต้ด้วยแชทหลักไว้ ยังไม่ได้ส่งอะไร ต้องตอบเอง")
+        elif status == 'followup_off':
+            lines.append("สถานะ: ลูกค้าทักมาอีก ไม่ได้ตอบให้ (ปิดตอบออโต้ไว้) ต้องตอบเอง")
         else:
             lines.append("สถานะ: ยังไม่ได้ตอบ จับคู่สินค้าไม่ได้ ต้องตอบเอง")
             if listing_name:
@@ -3071,11 +3077,14 @@ class FacebookMarketplaceRenewer:
             info, row_key,
             {c for c in self.REPLY_STAGES if folder_info.get(c) and self.stage_enabled.get(c, True)})
         if reason == 'done':
-            # มีโฟลเดอร์สินค้า แต่รีวิว/เพิ่มเติมไม่มีไฟล์ หรือถูกปิดการตอบออโต้ไว้
+            # ยังมีโฟลเดอร์ที่ยังไม่ได้ส่ง = เจ้าของปิดตอบออโต้ไว้ หรือโฟลเดอร์นั้นไม่มีไฟล์
+            # ไม่งั้นคือส่งครบจริง — ข้อความแจ้งเตือนต้องแยกกัน ไม่งั้นอ่านแล้วเข้าใจผิด
+            left = self.REPLY_STAGES[max(int(info.get('stage', 1)) - 1, 0):]
+            status = 'followup_off' if left else 'followup_done'
             info['row_key'] = row_key
             self.save_reply_settings()
-            self.update_status(f"{profile_name}: '{info.get('product', '?')}' ทักมาอีก (ไม่มีอะไรให้ส่งต่อ)", "orange")
-            self.notify_new_chat(profile_name, info.get('product', ''), 'followup_done', message=preview)
+            self.update_status(f"{profile_name}: '{info.get('product', '?')}' ทักมาอีก (ไม่ได้ตอบ รอตอบเอง)", "orange")
+            self.notify_new_chat(profile_name, info.get('product', ''), status, message=preview)
             return False
 
         try:

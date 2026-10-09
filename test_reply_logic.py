@@ -142,6 +142,20 @@ def test_stage_toggle_skips_disabled_folder():
     assert app.next_reply_stage(info, "new", available=set())[2] == 'done'
 
 
+def test_default_only_answers_the_first_message():
+    # ลูกค้าถาม "จ่ายปลายทางได้มั้ย" ต้องแค่แจ้งเตือน ห้ามยิงรีวิวกลับไปแทนคำตอบ
+    assert App.DEFAULT_STAGE_ENABLED['main'] is True
+    assert App.DEFAULT_STAGE_ENABLED['review'] is False
+    assert App.DEFAULT_STAGE_ENABLED['extra'] is False
+
+
+def test_notify_separates_disabled_from_finished():
+    off = app.build_notify_text("ID7", "โช๊คหลัง PCX", "followup_off", message="จ่ายปลายทางได้มั้ย")
+    assert "ปิดตอบออโต้ไว้" in off and "จ่ายปลายทางได้มั้ย" in off
+    assert "ครบ" not in off  # ห้ามบอกว่าส่งครบแล้ว ทั้งที่ยังไม่ได้ส่ง
+    assert "ครบ" in app.build_notify_text("ID7", "x", "followup_done")
+
+
 def test_stage_labels_cover_every_stage():
     # GUI สร้าง checkbox จาก ALL_STAGES ถ้าขาด label จะ KeyError ตอนเปิดโปรแกรม
     assert set(App.ALL_STAGES) == set(App.STAGE_LABELS)
@@ -196,6 +210,8 @@ if __name__ == "__main__":
     test_followup_advances_stages_then_stops()
     test_followup_skips_missing_folder()
     test_stage_toggle_skips_disabled_folder()
+    test_default_only_answers_the_first_message()
+    test_notify_separates_disabled_from_finished()
     test_stage_labels_cover_every_stage()
     test_followup_skips_unmatched_thread()
     test_split_text_to_messages()
