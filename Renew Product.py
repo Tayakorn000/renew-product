@@ -50,6 +50,11 @@ class FacebookMarketplaceRenewer:
     # (ลูกค้าถาม "จ่ายปลายทางได้มั้ย" แล้วโดนยิงรีวิวกลับ = ไม่ตอบคำถาม) ติ๊กเปิดเองได้
     DEFAULT_STAGE_ENABLED = {'main': True, 'review': False, 'extra': False}
 
+    # ต่ออายุสินค้าคั่นระหว่างเฝ้าแชท — ใช้ Chrome ตัวเดิมของ Profile นั้น
+    # (เปิด Chrome โปรไฟล์เดียวซ้อน 2 ตัวไม่ได้ เลยต้องสลับกันใช้ตัวเดียว)
+    RENEW_PAGE_URL = "https://www.facebook.com/marketplace/selling/renew_listings/"
+    DEFAULT_RENEW_INTERVAL_MIN = 30
+
     # FB เติมคำนำหน้าใน preview เมื่อข้อความล่าสุดเป็นของเราเอง
     PREVIEW_SELF_PREFIXES = ('คุณ:', 'you:')
 
@@ -77,6 +82,9 @@ class FacebookMarketplaceRenewer:
         self.reply_state = {}  # {profile_name: {thread_id: {...}}}
         # โฟลเดอร์ไหนให้ตอบออโต้บ้าง (ติ๊กใน GUI) — ปิดอันไหน ออโต้ข้ามอันนั้น ส่งด้วยมือได้เหมือนเดิม
         self.stage_enabled = dict(self.DEFAULT_STAGE_ENABLED)
+        # ต่ออายุสินค้าไปด้วยระหว่างเฝ้าแชท (ปิดไว้ก่อน ลูกค้าเปิดเองใน GUI)
+        self.renew_while_reply = False
+        self.renew_interval_min = self.DEFAULT_RENEW_INTERVAL_MIN
         self.telegram_token = DEFAULT_TELEGRAM_TOKEN
         self.telegram_chat_id = DEFAULT_TELEGRAM_CHAT_ID
         self.auto_reply_active = False
@@ -563,6 +571,8 @@ class FacebookMarketplaceRenewer:
                     saved_stages = data.get('stage_enabled') or {}
                     self.stage_enabled = {
                         c: bool(saved_stages.get(c, self.DEFAULT_STAGE_ENABLED[c])) for c in self.ALL_STAGES}
+                    self.renew_while_reply = bool(data.get('renew_while_reply', False))
+                    self.renew_interval_min = data.get('renew_interval_min') or self.DEFAULT_RENEW_INTERVAL_MIN
         except Exception:
             pass
 
@@ -576,6 +586,8 @@ class FacebookMarketplaceRenewer:
                     'telegram_token': getattr(self, 'telegram_token', ''),
                     'telegram_chat_id': getattr(self, 'telegram_chat_id', ''),
                     'stage_enabled': dict(getattr(self, 'stage_enabled', {})),
+                    'renew_while_reply': bool(getattr(self, 'renew_while_reply', False)),
+                    'renew_interval_min': getattr(self, 'renew_interval_min', self.DEFAULT_RENEW_INTERVAL_MIN),
                 }
                 text = json.dumps(data, ensure_ascii=False, indent=2)
                 with open(self.reply_settings_file, 'w', encoding='utf-8') as f:
@@ -775,6 +787,22 @@ class FacebookMarketplaceRenewer:
                 stage_row, text=self.STAGE_LABELS[category], variable=var,
                 font=("Arial", 9), command=self.save_stage_choice
             ).pack(side=tk.LEFT, padx=(0, 8))
+
+        # ต่ออายุสินค้าไปด้วยระหว่างเฝ้าแชท — ใช้ Chrome ตัวเดิม กดปุ่มต่ออายุแยกไม่ได้อยู่แล้ว
+        renew_row = tk.Frame(reply_frame)
+        renew_row.pack(fill=tk.X, pady=3)
+        tk.Label(renew_row, text="ต่ออายุด้วย:", font=("Arial", 9), width=12, anchor=tk.W).pack(side=tk.LEFT)
+        self.renew_while_reply_var = tk.BooleanVar(value=self.renew_while_reply)
+        tk.Checkbutton(
+            renew_row, text="ต่ออายุสินค้าไปด้วยระหว่างเฝ้าแชท ทุก", variable=self.renew_while_reply_var,
+            font=("Arial", 9), command=self.save_renew_choice
+        ).pack(side=tk.LEFT)
+        self.renew_interval_entry = tk.Entry(renew_row, font=("Arial", 9), width=5, justify=tk.CENTER)
+        self.renew_interval_entry.insert(0, str(self.renew_interval_min))
+        self.renew_interval_entry.pack(side=tk.LEFT, padx=4)
+        self.renew_interval_entry.bind("<FocusOut>", lambda e: self.save_renew_choice())
+        self.renew_interval_entry.bind("<Return>", lambda e: self.save_renew_choice())
+        tk.Label(renew_row, text="นาที", font=("Arial", 9)).pack(side=tk.LEFT)
 
         reply_btn_row = tk.Frame(reply_frame)
         reply_btn_row.pack(fill=tk.X, pady=5)
@@ -1585,6 +1613,33 @@ class FacebookMarketplaceRenewer:
         on = [self.STAGE_LABELS[c] for c in self.ALL_STAGES if self.stage_enabled.get(c)]
         self.update_status("ตอบออโต้ด้วย: " + (", ".join(on) if on else "ไม่ตอบอะไรเลย (แจ้งเตือนอย่างเดียว)"), "blue")
 
+    def save_renew_choice(self):
+        """ติ๊ก/แก้นาทีแล้วบันทึกทันที — มีผลรอบถัดไป ไม่ต้องกดหยุดแล้วเริ่มใหม่"""
+        self.renew_while_reply = bool(self.renew_while_reply_var.get())
+        self.renew_interval_min = self.clean_interval(self.renew_interval_entry.get())
+        self.renew_interval_entry.delete(0, tk.END)
+        self.renew_interval_entry.insert(0, str(self.renew_interval_min))
+        self.save_reply_settings()
+        if self.renew_while_reply:
+            self.update_status(f"ระหว่างเฝ้าแชท จะต่ออายุสินค้าให้ทุก {self.renew_interval_min} นาที", "blue")
+        else:
+            self.update_status("ระหว่างเฝ้าแชท ไม่ต่ออายุสินค้าให้", "blue")
+
+    def clean_interval(self, raw):
+        """ช่องนาทีลูกค้าพิมพ์เอง ว่าง/ตัวอักษร/0 = ใช้ค่าเริ่มต้น ไม่ใช่พัง"""
+        try:
+            minutes = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return self.DEFAULT_RENEW_INTERVAL_MIN
+        return minutes if minutes >= 1 else self.DEFAULT_RENEW_INTERVAL_MIN
+
+    def renew_due(self, last_renew_ts, now=None):
+        """ถึงเวลาต่ออายุรอบถัดไปหรือยัง (เอาติ๊กออก = หยุดต่อตั้งแต่รอบถัดไป)"""
+        if not getattr(self, 'renew_while_reply', False):
+            return False
+        now = time.time() if now is None else now
+        return now - last_renew_ts >= self.clean_interval(self.renew_interval_min) * 60
+
     def build_notify_text(self, profile_name, product, status, listing_name="", message=""):
         """ข้อความแจ้งเตือนลูกค้าทักเข้า — บอกว่ามาจากเฟสไหนเป็นอันดับแรก (ลูกค้ามี 20 เฟส)"""
         lines = [
@@ -2224,22 +2279,29 @@ class FacebookMarketplaceRenewer:
             
             raise Exception(error_msg)
     
-    def renew_profile_worker(self, profile_name):
-        """Worker thread สำหรับต่ออายุ Profile"""
+    def renew_profile_worker(self, profile_name, keep_open=False):
+        """Worker thread สำหรับต่ออายุ Profile
+
+        keep_open=True คือเรียกจากระหว่างเฝ้าแชท ใช้ Chrome ตัวเดิม ห้ามปิดตอนจบ
+        """
         driver = None
-        renew_page_url = "https://www.facebook.com/marketplace/selling/renew_listings/"
-        
+        renew_page_url = self.RENEW_PAGE_URL
+
         try:
             driver = self.profile_status[profile_name]['driver']
-            
+
             if not driver:
                 raise Exception("ไม่พบ Chrome driver")
-            
+
             renewed_count = 0
             no_button_refresh_count = 0
             renew_url_use_count = 0  # นับจำนวนครั้งที่ใช้ URL Renew
-            
+
             while True:
+                # กดหยุดเฝ้าแชทระหว่างต่ออายุอยู่ ออกทันที ไม่ให้รอจนต่อครบลิสต์
+                if keep_open and not self.auto_reply_active:
+                    break
+
                 # ตรวจสอบว่า Chrome ยังเปิดอยู่หรือไม่
                 try:
                     current_url = driver.current_url
@@ -2254,10 +2316,11 @@ class FacebookMarketplaceRenewer:
                     # ตรวจสอบว่าใช้ URL เกิน 4 ครั้งหรือไม่
                     if renew_url_use_count > 4:
                         self.update_status(f"{profile_name}: Error - ใช้ URL มากเกินไป ({renew_url_use_count} ครั้ง)", "red")
-                        try:
-                            driver.quit()
-                        except:
-                            pass
+                        if not keep_open:
+                            try:
+                                driver.quit()
+                            except:
+                                pass
                         raise Exception(f"ใช้ URL Renew มากเกินไป ({renew_url_use_count} ครั้ง)")
                     
                     self.update_status(f"{profile_name}: ไม่ได้อยู่หน้าต่ออายุ กลับไปหน้าต่ออายุ (ครั้งที่ {renew_url_use_count}/4)...", "orange")
@@ -2402,10 +2465,11 @@ class FacebookMarketplaceRenewer:
                             # ตรวจสอบว่าใช้ URL เกิน 4 ครั้งหรือไม่
                             if renew_url_use_count > 4:
                                 self.update_status(f"{profile_name}: Error - ใช้ URL มากเกินไป ({renew_url_use_count} ครั้ง)", "red")
-                                try:
-                                    driver.quit()
-                                except:
-                                    pass
+                                if not keep_open:
+                                    try:
+                                        driver.quit()
+                                    except:
+                                        pass
                                 raise Exception(f"ใช้ URL Renew มากเกินไป ({renew_url_use_count} ครั้ง)")
                             
                             self.update_status(f"{profile_name}: กลับไปหน้าต่ออายุ (ครั้งที่ {renew_url_use_count}/4)...", "blue")
@@ -2418,10 +2482,11 @@ class FacebookMarketplaceRenewer:
                         except:
                             # ถ้ายังไม่ได้ ปิด Chrome และแจ้ง GUI
                             self.update_status(f"{profile_name}: Error 2 ครั้ง ปิด Chrome...", "red")
-                            try:
-                                driver.quit()
-                            except:
-                                pass
+                            if not keep_open:
+                                try:
+                                    driver.quit()
+                                except:
+                                    pass
                             raise Exception("Error รีเฟรช 2 ครั้ง ปิด Chrome แล้ว")
                     
                     time.sleep(random.uniform(3, 5))
@@ -2518,21 +2583,22 @@ class FacebookMarketplaceRenewer:
             # เสร็จแล้ว - ปิด Chrome ของ Profile นี้
             self.profile_status[profile_name]['stage'] = 'completed'
             self.update_status(f"{profile_name}: เสร็จสิ้น - ต่ออายุ {renewed_count} รายการ", "green")
-            
-            # ปิด Chrome
-            try:
-                driver.quit()
-                self.update_status(f"{profile_name}: ปิด Chrome แล้ว", "gray")
-            except:
-                pass
-            
+
+            # ปิด Chrome (ยกเว้นเรียกมาจากระหว่างเฝ้าแชท ต้องเอา Chrome ตัวนี้ไปอ่านแชทต่อ)
+            if not keep_open:
+                try:
+                    driver.quit()
+                    self.update_status(f"{profile_name}: ปิด Chrome แล้ว", "gray")
+                except:
+                    pass
+
         except Exception as e:
             self.profile_status[profile_name]['stage'] = 'failed'
             self.profile_status[profile_name]['error'] = str(e)
             self.update_status(f"{profile_name}: ล้มเหลว - {str(e)[:50]}", "red")
-            
-            # ปิด Chrome ถ้ายังเปิดอยู่
-            if driver:
+
+            # ปิด Chrome ถ้ายังเปิดอยู่ (ระหว่างเฝ้าแชทปล่อยไว้ ให้ลูปแชทเช็คเองว่า Chrome ตายยัง)
+            if driver and not keep_open:
                 try:
                     driver.quit()
                 except:
@@ -2916,6 +2982,7 @@ class FacebookMarketplaceRenewer:
     def auto_reply_worker(self, profile_name, driver, product_folders):
         """monitor inbox ของ Profile นี้ วนหาแชทใหม่แล้วตอบอัตโนมัติ จนกว่า auto_reply_active จะเป็น False"""
         self.reply_state.setdefault(profile_name, {})
+        last_renew = 0.0  # 0 = ต่ออายุให้รอบแรกเลย ลูกค้าจะได้เห็นว่ามันทำงานจริง
 
         while self.auto_reply_active:
             try:
@@ -2962,6 +3029,11 @@ class FacebookMarketplaceRenewer:
             except Exception as e:
                 self.update_status(f"{profile_name}: Error สแกนแชท - {str(e)[:80]}", "orange")
 
+            # ถึงรอบต่ออายุสินค้าหรือยัง — ใช้ Chrome ตัวเดิม เปิดโปรไฟล์เดียวซ้อนกันไม่ได้
+            if self.auto_reply_active and self.renew_due(last_renew):
+                last_renew = time.time()
+                self.renew_pass_during_reply(profile_name, driver)
+
             # พักก่อน scan รอบถัดไป — เช็คแฟล็กหยุดทุกวินาทีเพื่อให้กดหยุดแล้วตอบสนองไว
             for _ in range(int(random.uniform(40, 80))):
                 if not self.auto_reply_active:
@@ -2973,6 +3045,29 @@ class FacebookMarketplaceRenewer:
         except Exception:
             pass
         self.update_status(f"{profile_name}: ปิด Chrome แล้ว (หยุดตอบแชท)", "gray")
+
+    def renew_pass_during_reply(self, profile_name, driver):
+        """คั่นรอบเฝ้าแชทไปต่ออายุสินค้า แล้วกลับมาอ่านแชทต่อด้วย Chrome ตัวเดิม"""
+        if not hasattr(self, 'profile_status'):
+            self.profile_status = {}
+        self.profile_status.setdefault(profile_name, {})
+        self.profile_status[profile_name].update({
+            'driver': driver, 'stage': 'renewing', 'renewed_count': 0, 'error': None,
+            'hard_refresh_count': 0, 'hard_refresh_reason': None,
+        })
+        # ล้างตัวนับพักมือของรอบก่อน ไม่งั้นรอบนี้ที่นับใหม่จาก 0 จะไม่พักเลย = ดูเป็นบอท
+        if hasattr(self, f'_next_rest_{profile_name}'):
+            delattr(self, f'_next_rest_{profile_name}')
+
+        self.update_status(f"{profile_name}: พักเฝ้าแชท ไปต่ออายุสินค้า...", "blue")
+        try:
+            # เปิดหน้าต่ออายุให้ก่อน ไม่งั้น worker เห็นว่ายังอยู่หน้า inbox แล้วเสีย URL budget ไป 1 ครั้ง
+            driver.get(self.RENEW_PAGE_URL)
+            self.wait_for_page_load(driver)
+            time.sleep(random.uniform(2, 4))
+            self.renew_profile_worker(profile_name, keep_open=True)
+        except Exception as e:
+            self.update_status(f"{profile_name}: ต่ออายุระหว่างเฝ้าแชทไม่สำเร็จ - {str(e)[:60]}", "orange")
 
     def handle_one_conversation(self, profile_name, driver, href, thread_id, product_folders, row_key=None):
         """เปิดแชทเดี่ยว ตรวจว่าเป็นข้อความแรกจากลูกค้าหรือไม่ จับคู่สินค้า แล้วส่งข้อมูล"""

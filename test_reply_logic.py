@@ -149,6 +149,23 @@ def test_default_only_answers_the_first_message():
     assert App.DEFAULT_STAGE_ENABLED['extra'] is False
 
 
+def test_renew_due_respects_toggle_and_interval():
+    app.renew_while_reply = False
+    app.renew_interval_min = 30
+    assert app.renew_due(0, now=10 ** 9) is False  # ไม่ติ๊ก = ไม่ต่ออายุ แม้ทิ้งไว้ทั้งวัน
+
+    app.renew_while_reply = True
+    assert app.renew_due(1000, now=1000 + 29 * 60) is False
+    assert app.renew_due(1000, now=1000 + 30 * 60) is True
+    assert app.renew_due(0.0) is True  # last_renew=0.0 ของรอบแรก = ต่ออายุเลย
+
+    # ช่องนาทีลูกค้าพิมพ์เอง ว่าง/ตัวอักษร/0 ต้องไม่ทำให้ worker พัง
+    for bad in ("", "  ", "ห้า", None, 0, -5):
+        app.renew_interval_min = bad
+        assert app.clean_interval(bad) == App.DEFAULT_RENEW_INTERVAL_MIN
+        assert app.renew_due(1000, now=1000 + 30 * 60) is True
+
+
 def test_notify_separates_disabled_from_finished():
     off = app.build_notify_text("ID7", "โช๊คหลัง PCX", "followup_off", message="จ่ายปลายทางได้มั้ย")
     assert "ปิดตอบออโต้ไว้" in off and "จ่ายปลายทางได้มั้ย" in off
@@ -211,6 +228,7 @@ if __name__ == "__main__":
     test_followup_skips_missing_folder()
     test_stage_toggle_skips_disabled_folder()
     test_default_only_answers_the_first_message()
+    test_renew_due_respects_toggle_and_interval()
     test_notify_separates_disabled_from_finished()
     test_stage_labels_cover_every_stage()
     test_followup_skips_unmatched_thread()
