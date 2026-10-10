@@ -3031,8 +3031,10 @@ class FacebookMarketplaceRenewer:
 
             # ถึงรอบต่ออายุสินค้าหรือยัง — ใช้ Chrome ตัวเดิม เปิดโปรไฟล์เดียวซ้อนกันไม่ได้
             if self.auto_reply_active and self.renew_due(last_renew):
-                last_renew = time.time()
                 self.renew_pass_during_reply(profile_name, driver)
+                # นับเวลาจากตอนต่อเสร็จ ไม่ใช่ตอนเริ่ม ไม่งั้นรอบที่ต่อนานกว่า 30 นาที
+                # จะวนไปต่ออายุต่อทันทีโดยไม่ได้อ่านแชทคั่นเลย
+                last_renew = time.time()
 
             # พักก่อน scan รอบถัดไป — เช็คแฟล็กหยุดทุกวินาทีเพื่อให้กดหยุดแล้วตอบสนองไว
             for _ in range(int(random.uniform(40, 80))):
