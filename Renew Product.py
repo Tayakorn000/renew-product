@@ -1606,7 +1606,7 @@ class FacebookMarketplaceRenewer:
 
         def _worker():
             # คนที่เพิ่งทักบอทถูกเพิ่มตรงนี้ แล้วได้ข้อความทดสอบไปด้วยเลย
-            self.add_new_telegram_chats()
+            self.add_new_telegram_chats(force=True)
             ok, err = self.send_telegram("ทดสอบการแจ้งเตือนจากโปรแกรมต่ออายุสินค้า Facebook")
             if ok:
                 note = f"\n\nแต่ส่งไม่ถึง {err}" if err else ""
@@ -1712,12 +1712,17 @@ class FacebookMarketplaceRenewer:
                 self.telegram_chat_id = ", ".join(known + list(new))
             return new
 
-    def add_new_telegram_chats(self):
+    def add_new_telegram_chats(self, force=False):
         """ใครทักบอทเข้ามา เพิ่มเข้าช่อง Chat ID ให้เอง ไม่ต้องเปิด getUpdates หาเลขมากรอก
         ไม่ส่ง offset = ไม่ลบคิวฝั่ง Telegram เพราะ exe ทุกเครื่องใช้บอทตัวเดียวกัน เครื่องไหนลบ เครื่องอื่นไม่เห็น"""
         token = (getattr(self, 'telegram_token', '') or '').strip()
         if not token:
             return
+        # 20 เฟสแจ้งเตือนถี่ๆ ไม่ต้องถาม Telegram ทุกอัน (ถามซ้อนกันโดน 409) ปุ่มทดสอบส่งใช้ force เช็คทันที
+        with self.TELEGRAM_LOCK:
+            if not force and time.time() - getattr(self, 'telegram_polled', 0) < 60:
+                return
+            self.telegram_polled = time.time()
         # ponytail: getUpdates ให้แค่ 100 อันเก่าสุดที่ค้างใน 24 ชม. มีคนพิมพ์ใส่บอทเกินนั้นคนใหม่จะเข้าช้า ถึงตอนนั้นค่อยไล่ด้วย offset
         try:
             with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10) as resp:

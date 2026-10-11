@@ -4,6 +4,7 @@
 ต้อง live-test บนเครื่อง Windows ของลูกค้าที่มี Chrome + login จริง
 """
 import importlib.util
+import io
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -90,6 +91,22 @@ def test_people_who_message_the_bot_get_added():
     # ทักบอทมาใหม่ถึงจะกลับเข้ามา
     assert app.merge_telegram_chats({"result": [msg(222, 50, "พี่")]}) == {"222": "พี่"}
     assert app.merge_telegram_chats({"ok": False}) == {} and app.telegram_seen == 50
+
+
+def test_bot_poll_is_throttled():
+    calls = []
+    real = renew_product.urllib.request.urlopen
+    renew_product.urllib.request.urlopen = lambda *a, **k: (calls.append(1), io.BytesIO(b'{"result": []}'))[1]
+    try:
+        app.telegram_token, app.telegram_polled = "t", 0
+        app.add_new_telegram_chats()
+        app.add_new_telegram_chats()
+        assert len(calls) == 1  # แจ้งเตือนถี่ๆ ถาม Telegram แค่รอบเดียว
+        app.add_new_telegram_chats(force=True)
+        assert len(calls) == 2  # ปุ่มทดสอบส่งต้องเช็คทันที
+    finally:
+        renew_product.urllib.request.urlopen = real
+        app.telegram_token = ""
 
 
 def test_login_pending_url():
@@ -245,6 +262,7 @@ if __name__ == "__main__":
     test_notify_text_names_the_profile()
     test_send_telegram_without_config_is_quiet()
     test_people_who_message_the_bot_get_added()
+    test_bot_poll_is_throttled()
     test_cookie_skips_nameless()
     test_inbox_row_key_ignores_relative_time()
     test_preview_message_reads_what_customer_typed()
