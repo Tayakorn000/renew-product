@@ -3345,27 +3345,33 @@ def source_version(src):
     return int(m.group(1)) if m else 0
 
 
+def cached_update():
+    """(เวอร์ชัน, โค้ด compile แล้ว) ของไฟล์ที่โหลดเก็บไว้ — ไม่มีไฟล์/ไฟล์พัง = (0, None)"""
+    try:
+        with open(UPDATE_FILE, encoding='utf-8', newline='') as f:
+            src = f.read()
+        return source_version(src), compile(src, UPDATE_FILE, 'exec')
+    except Exception:
+        return 0, None
+
+
 def load_update():
     """โค้ดเวอร์ชันใหม่กว่าที่ฝังใน exe (compile แล้ว) — ไม่มี/โหลดไม่ได้/ไฟล์พัง = None
     โหลดได้ก็เก็บลงไฟล์ไว้ เน็ตล่มรอบหน้าจะได้ไม่ถอยกลับไปตัวเก่าที่ฝังมา"""
     try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=10) as resp:
+        # หน้าต่างยังไม่ขึ้นจนกว่าจะเช็คเสร็จ เน็ตอืดเกิน 5 วิ ใช้ตัวที่มีอยู่ไปก่อน
+        with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
             src = resp.read().decode('utf-8-sig')
-        if source_version(src) > APP_VERSION:
+        # เทียบกับตัวที่โหลดเก็บไว้ด้วย ไม่งั้นพอเลขบน main สูงกว่า exe แล้ว ทุก push ถึงลูกค้าทั้งที่ยังไม่เพิ่มเลข
+        if source_version(src) > max(APP_VERSION, cached_update()[0]):
             # เขียนไฟล์ชั่วคราวแล้วค่อยสลับ ไฟดับกลางคันจะได้ไม่เหลือไฟล์ครึ่งเดียวที่รันแล้วไม่มีหน้าต่างขึ้น
             with open(UPDATE_FILE + '.part', 'w', encoding='utf-8', newline='') as f:
                 f.write(src)
             os.replace(UPDATE_FILE + '.part', UPDATE_FILE)
     except Exception:
         pass
-    try:
-        with open(UPDATE_FILE, encoding='utf-8', newline='') as f:
-            src = f.read()
-        if source_version(src) > APP_VERSION:
-            return compile(src, UPDATE_FILE, 'exec')
-    except Exception:
-        pass
-    return None
+    version, code = cached_update()
+    return code if version > APP_VERSION else None
 
 
 def run_update():

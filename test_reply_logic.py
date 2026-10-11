@@ -131,8 +131,12 @@ def test_exe_runs_newer_source_from_github():
         assert renew_product.run_update() is False and not os.path.exists(cache)
 
         # เวอร์ชันใหม่กว่า = รันตัวใหม่ และบอกตัวใหม่ว่าไม่ต้องเช็คอัปเดตซ้ำ
-        remote["src"] = f"APP_VERSION = {newer}\nopen({ran!r}, 'w').write(str(UPDATED))\n"
-        assert renew_product.run_update() is True and open(ran).read() == "True"
+        remote["src"] = f"APP_VERSION = {newer}\nopen({ran!r}, 'w').write(f'{{UPDATED}} A')\n"
+        assert renew_product.run_update() is True and open(ran).read() == "True A"
+
+        # push ต่อโดยไม่เพิ่มเลข = เครื่องที่โหลดเลขนี้ไปแล้วยังรันตัวเดิม (เลขใน exe ค้างที่เลขตอน build ตลอด)
+        remote["src"] = f"APP_VERSION = {newer}\nopen({ran!r}, 'w').write('B')\n"
+        assert renew_product.run_update() is True and open(ran).read() == "True A"
 
         # เน็ตล่มรอบถัดไป ยังได้ตัวใหม่จากไฟล์ที่เก็บไว้
         os.remove(ran)
@@ -140,10 +144,14 @@ def test_exe_runs_newer_source_from_github():
         assert renew_product.run_update() is True and os.path.exists(ran)
 
         # ตัวใหม่ใช้ไลบรารีที่ exe ไม่มี หรือไฟล์ขาดกลาง = ถอยไปใช้ตัวที่ฝังมา
-        remote["src"] = f"APP_VERSION = {newer}\nimport no_such_module_xyz\n"
+        remote["src"] = f"APP_VERSION = {newer + 1}\nimport no_such_module_xyz\n"
         assert renew_product.run_update() is False
-        remote["src"] = f"APP_VERSION = {newer}\ndef broken(:\n"
+        remote["src"] = f"APP_VERSION = {newer + 2}\ndef broken(:\n"
         assert renew_product.run_update() is False
+
+        # แก้ไฟล์พังแล้ว push เลขเดิมซ้ำก็กลับมาได้ ไม่ค้างอยู่กับไฟล์พัง
+        remote["src"] = f"APP_VERSION = {newer + 2}\nopen({ran!r}, 'w').write('C')\n"
+        assert renew_product.run_update() is True and open(ran).read() == "C"
     finally:
         renew_product.urllib.request.urlopen, renew_product.UPDATE_FILE = real_open, real_file
 
