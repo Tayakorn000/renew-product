@@ -1,0 +1,19 @@
+# build exe ของ Windows บนเครื่อง Linux: Python ของ Windows ตัวจริงจาก python.org รันใต้ Wine
+# ใช้ตอนเครื่อง Windows ปิดอยู่ วิธีใช้อยู่ใน README
+FROM debian:trixie-slim
+ENV DEBIAN_FRONTEND=noninteractive WINEDEBUG=-all WINEPREFIX=/wine
+# ตัวติดตั้ง Python เป็นโปรแกรม 32 บิต ถึงจะลง Python 64 บิตก็ต้องมี wine32
+RUN dpkg --add-architecture i386 && apt-get update \
+ && apt-get install -y --no-install-recommends wine wine32:i386 wine64 xvfb xauth curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+ARG PYTHON_VERSION=3.12.10
+RUN curl -fsSLo /tmp/py.exe https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-amd64.exe \
+ && xvfb-run sh -c 'wine /tmp/py.exe /quiet TargetDir=C:\\Python InstallAllUsers=1 PrependPath=1 Include_doc=0 Include_test=0 Include_launcher=0; wineserver -w' \
+ && rm /tmp/py.exe
+# psutil กับ pywin32 โปรแกรม import ในฟังก์ชัน ไม่ลง = exe ออกมาได้แต่ปิด Chrome ตอนออกโปรแกรมไม่ได้
+RUN wine 'C:\Python\python.exe' -m pip install --no-cache-dir pyinstaller selenium undetected-chromedriver psutil pywin32 \
+ && wineserver -w
+WORKDIR /src
+# ไฟล์ที่ได้เป็นของ root ถ้าไม่ chown คืน ลบโฟลเดอร์ build บนเครื่องจริงไม่ได้
+CMD wine 'C:\Python\Scripts\pyinstaller.exe' --noconfirm --onefile --windowed --name "Renew Product" "Renew Product.py" \
+ ; wineserver -w ; chown -R --reference=. .

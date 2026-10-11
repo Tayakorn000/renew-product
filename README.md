@@ -9,11 +9,13 @@
 ```
 git clone https://github.com/Tayakorn000/renew-product.git
 cd renew-product
-pip install selenium undetected-chromedriver pyinstaller
+pip install selenium undetected-chromedriver psutil pywin32 pyinstaller
 pyinstaller --onefile --windowed --name "Renew Product" "Renew Product.py"
 ```
 
 exe ออกที่ `dist\Renew Product.exe`
+
+(`psutil` กับ `pywin32` ต้องลงด้วย โปรแกรม import ในฟังก์ชัน ไม่ลงก็ build ผ่านแต่ปิด Chrome ตอนออกโปรแกรมไม่ได้)
 
 แก้โค้ดรอบหน้า ไม่ต้อง clone ใหม่ แค่:
 
@@ -31,6 +33,25 @@ scp "tayak@100.123.73.107:C:/build/Renew Product/dist/Renew Product.exe" ~/Downl
 ```
 
 (path ปลายทางของ scp ต้องใช้ `/` ไม่ใช่ `\`)
+
+### เครื่อง Windows ปิดอยู่ build บน winserver แทน
+
+Linux build exe ของ Windows ตรงๆ ไม่ได้ `Dockerfile.wine` เลยลง Python ของ Windows (จาก python.org) ไว้ใต้ Wine ใน Docker
+image `renew-winbuild` สร้างไว้บน winserver แล้ว (ราว 5GB) รอบหน้าข้ามบรรทัด `docker build` ได้ เว้นแต่แก้ `Dockerfile.wine`
+
+```
+ssh localhost@100.97.191.26 'mkdir -p ~/build/renew-product'
+scp Dockerfile.wine "Renew Product.py" telegram_default.py localhost@100.97.191.26:build/renew-product/
+ssh localhost@100.97.191.26 'cd ~/build/renew-product && docker build -f Dockerfile.wine -t renew-winbuild . && docker run --rm -v "$PWD:/src" renew-winbuild'
+scp "localhost@100.97.191.26:build/renew-product/dist/Renew Product.exe" ~/Downloads/
+ssh localhost@100.97.191.26 'rm -rf ~/build/renew-product'
+```
+
+บรรทัดสุดท้ายห้ามข้าม ในโฟลเดอร์นั้นมี `telegram_default.py` ที่มี token อยู่
+
+เพิ่มไลบรารีใหม่ในโค้ด ต้องเพิ่มในบรรทัด `pip install` ของ `Dockerfile.wine` ด้วย
+exe ที่ได้ไม่มีไฟล์ของ Wine ปน (เทียบ DLL กับตัวที่ build จาก Windows แล้วตรงกัน) เปิดใต้ Wine ได้
+แต่ส่วนที่เปิด Chrome ลองใต้ Wine ไม่ได้ ต้องลองบน Windows จริง
 
 ## อัปเดตอัตโนมัติ
 
