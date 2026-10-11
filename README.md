@@ -22,6 +22,16 @@ git pull
 pyinstaller --onefile --windowed --name "Renew Product" "Renew Product.py"
 ```
 
+เครื่อง Windows ที่ใช้ build (`desktop-k0b7rmq` ใน Tailscale) ไม่มี git ลงไว้ ก็ scp ไฟล์ไปแทน:
+
+```
+scp "Renew Product.py" telegram_default.py "tayak@100.123.73.107:C:/build/Renew Product/"
+ssh tayak@100.123.73.107 'cd /d "C:\build\Renew Product" && pyinstaller --noconfirm --onefile --windowed --name "Renew Product" "Renew Product.py"'
+scp "tayak@100.123.73.107:C:/build/Renew Product/dist/Renew Product.exe" ~/Downloads/
+```
+
+(path ปลายทางของ scp ต้องใช้ `/` ไม่ใช่ `\`)
+
 ## แจ้งเตือน Telegram
 
 เวลามีลูกค้าทักเข้ามา โปรแกรมยิงแจ้งเตือนเข้า Telegram ได้ บอกว่ามาจากเฟสไหน สินค้าอะไร ตอบไปหรือยัง
