@@ -41,6 +41,8 @@ class FacebookMarketplaceRenewer:
     # worker ของทุก Profile เขียน reply_settings.json ไฟล์เดียวกัน ต้องกันเขียนทับกันเอง
     # ไม่มี lock = ไฟล์ขาดกลาง โหลดรอบหน้าไม่ขึ้น แล้วส่งข้อมูลหลักซ้ำให้ลูกค้าเก่าทุกคน
     SETTINGS_LOCK = threading.Lock()
+    # แจ้งเตือนยิงพร้อมกันได้หลาย Profile เจอคนทักบอทคนเดียวกันพร้อมกัน ต้องเพิ่มแค่ครั้งเดียว
+    TELEGRAM_LOCK = threading.Lock()
 
     # ลำดับโฟลเดอร์ที่ส่งตามหลัง main ทุกครั้งที่ลูกค้าทักกลับมา (stage 1 = ส่ง main ไปแล้ว)
     REPLY_STAGES = ['review', 'extra']
@@ -87,6 +89,7 @@ class FacebookMarketplaceRenewer:
         self.renew_interval_min = self.DEFAULT_RENEW_INTERVAL_MIN
         self.telegram_token = DEFAULT_TELEGRAM_TOKEN
         self.telegram_chat_id = DEFAULT_TELEGRAM_CHAT_ID
+        self.telegram_seen = 0  # เวลาของข้อความล่าสุดที่คนทักบอท ที่เก็บเข้าช่อง Chat ID ไปแล้ว
         self.auto_reply_active = False
         self.reply_drivers = {}  # profile_name -> driver ที่ยังเปิดอยู่ระหว่างตอบแชท
         self._reply_list_index = []  # index ของ reply_listbox -> (profile_name, thread_id)
@@ -98,7 +101,9 @@ class FacebookMarketplaceRenewer:
         self.load_settings()
         self.load_reply_settings()
         self.setup_gui()
-    
+        # รอ mainloop ขึ้นก่อน thread ถึงเรียก root.after ได้
+        self.root.after(1000, lambda: threading.Thread(target=self.add_new_telegram_chats, daemon=True).start())
+
     def on_closing(self):
         """ฟังก์ชันที่ทำงานเมื่อปิดหน้าต่าง GUI"""
         try:
@@ -568,6 +573,7 @@ class FacebookMarketplaceRenewer:
                     # ที่กรอกในโปรแกรมชนะค่าที่ฝังมากับ exe ลูกค้าเปลี่ยนเป็นบอทตัวเองได้
                     self.telegram_token = data.get('telegram_token') or DEFAULT_TELEGRAM_TOKEN
                     self.telegram_chat_id = data.get('telegram_chat_id') or DEFAULT_TELEGRAM_CHAT_ID
+                    self.telegram_seen = data.get('telegram_seen') or 0
                     saved_stages = data.get('stage_enabled') or {}
                     self.stage_enabled = {
                         c: bool(saved_stages.get(c, self.DEFAULT_STAGE_ENABLED[c])) for c in self.ALL_STAGES}
@@ -585,6 +591,7 @@ class FacebookMarketplaceRenewer:
                     'state': {p: dict(threads) for p, threads in list(self.reply_state.items())},
                     'telegram_token': getattr(self, 'telegram_token', ''),
                     'telegram_chat_id': getattr(self, 'telegram_chat_id', ''),
+                    'telegram_seen': getattr(self, 'telegram_seen', 0),
                     'stage_enabled': dict(getattr(self, 'stage_enabled', {})),
                     'renew_while_reply': bool(getattr(self, 'renew_while_reply', False)),
                     'renew_interval_min': getattr(self, 'renew_interval_min', self.DEFAULT_RENEW_INTERVAL_MIN),
@@ -1593,14 +1600,17 @@ class FacebookMarketplaceRenewer:
         self.telegram_chat_id = self.tg_chat_entry.get().strip()
         self.save_reply_settings()
 
-        if not self.telegram_token or not self.telegram_chat_id:
-            messagebox.showwarning("คำเตือน", "กรุณากรอก Telegram Token และ Chat ID ให้ครบ")
+        if not self.telegram_token:
+            messagebox.showwarning("คำเตือน", "กรุณากรอก Telegram Token")
             return
 
         def _worker():
+            # คนที่เพิ่งทักบอทถูกเพิ่มตรงนี้ แล้วได้ข้อความทดสอบไปด้วยเลย
+            self.add_new_telegram_chats()
             ok, err = self.send_telegram("ทดสอบการแจ้งเตือนจากโปรแกรมต่ออายุสินค้า Facebook")
             if ok:
-                self.root.after(0, lambda: messagebox.showinfo("สำเร็จ", "ส่งข้อความทดสอบแล้ว เช็คใน Telegram ได้เลย"))
+                note = f"\n\nแต่ส่งไม่ถึง {err}" if err else ""
+                self.root.after(0, lambda: messagebox.showinfo("สำเร็จ", f"ส่งข้อความทดสอบแล้ว เช็คใน Telegram ได้เลย{note}"))
             else:
                 self.root.after(0, lambda: messagebox.showerror("ส่งไม่สำเร็จ", f"ส่งข้อความทดสอบไม่ได้\n\n{err}"))
 
@@ -1670,29 +1680,92 @@ class FacebookMarketplaceRenewer:
         lines.append(f"เวลา: {time.strftime('%d/%m/%Y %H:%M')}")
         return "\n".join(lines)
 
-    def send_telegram(self, text):
-        """ยิงข้อความเข้า Telegram bot — ใช้ urllib (ไม่ต้องลง requests เพิ่มตอน build exe)
-        คืน (สำเร็จ, ข้อความ error) ไม่ throw เพราะห้ามให้แจ้งเตือนล้มแล้วลากการตอบแชทพังตาม"""
+    def chat_id_list(self):
+        """ช่อง Chat ID มีได้หลายแชท คั่นด้วย , — ลบเลขไหนออกจากช่อง แชทนั้นเลิกได้แจ้งเตือน"""
+        return [c for c in re.split(r'[,\s]+', getattr(self, 'telegram_chat_id', '') or '') if c]
+
+    def chats_from_updates(self, payload, after=0):
+        """แชทที่ทักบอทเข้ามา จากผล getUpdates — คืน ({chat_id: ชื่อ}, เวลาของอันล่าสุด)
+        เอาแต่อันที่ใหม่กว่า after ไม่งั้นคนที่ลบออกจากช่อง Chat ID ไปแล้วเด้งกลับมาเองทุกรอบ
+        (เทียบด้วยเวลา ไม่ใช้ update_id เพราะบอทเงียบเกินสัปดาห์ Telegram สุ่มเลข update_id ใหม่)"""
+        found, newest = {}, after
+        for update in (payload or {}).get('result') or []:
+            member = update.get('my_chat_member')
+            # โดนเตะออกจากกลุ่ม/โดนบล็อก ก็มาทาง my_chat_member เหมือนตอนถูกดึงเข้ากลุ่ม
+            if member and (member.get('new_chat_member') or {}).get('status') not in ('member', 'administrator'):
+                continue
+            event = update.get('message') or member or {}
+            chat, date = event.get('chat') or {}, event.get('date') or 0
+            if chat.get('id') is None or date <= after:
+                continue
+            found[str(chat['id'])] = chat.get('title') or chat.get('first_name') or chat.get('username') or ''
+            newest = max(newest, date)
+        return found, newest
+
+    def merge_telegram_chats(self, payload):
+        """เอาคนที่ทักบอทเข้ามาใส่ช่อง Chat ID — คืน {chat_id: ชื่อ} เฉพาะคนที่เพิ่งเพิ่ม"""
+        with self.TELEGRAM_LOCK:
+            found, self.telegram_seen = self.chats_from_updates(payload, getattr(self, 'telegram_seen', 0))
+            known = self.chat_id_list()
+            new = {c: name for c, name in found.items() if c not in known}
+            if new:
+                self.telegram_chat_id = ", ".join(known + list(new))
+            return new
+
+    def add_new_telegram_chats(self):
+        """ใครทักบอทเข้ามา เพิ่มเข้าช่อง Chat ID ให้เอง ไม่ต้องเปิด getUpdates หาเลขมากรอก
+        ไม่ส่ง offset = ไม่ลบคิวฝั่ง Telegram เพราะ exe ทุกเครื่องใช้บอทตัวเดียวกัน เครื่องไหนลบ เครื่องอื่นไม่เห็น"""
         token = (getattr(self, 'telegram_token', '') or '').strip()
-        chat_id = (getattr(self, 'telegram_chat_id', '') or '').strip()
-        if not token or not chat_id:
-            return False, "ยังไม่ได้ตั้งค่า Token หรือ Chat ID"
+        if not token:
+            return
+        # ponytail: getUpdates ให้แค่ 100 อันเก่าสุดที่ค้างใน 24 ชม. มีคนพิมพ์ใส่บอทเกินนั้นคนใหม่จะเข้าช้า ถึงตอนนั้นค่อยไล่ด้วย offset
+        try:
+            with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10) as resp:
+                new = self.merge_telegram_chats(json.load(resp))
+        except Exception:
+            return
+        if not new:
+            return
+        self.save_reply_settings()
+
+        # ช่องใน GUI ต้องตามให้ทัน ไม่งั้นกดบันทึกรอบหน้าเอาค่าเก่าในช่องมาทับ คนใหม่หาย
+        def _show():
+            self.tg_chat_entry.delete(0, tk.END)
+            self.tg_chat_entry.insert(0, self.telegram_chat_id)
+        self.root.after(0, _show)
+
+        for chat_id, name in new.items():
+            self.send_telegram(f"เพิ่ม {name or 'แชทใหม่'} ({chat_id}) เข้ารับแจ้งเตือนแล้ว\n"
+                               "ถ้าไม่ใช่คนของเรา ลบเลขนี้ออกจากช่อง Chat ID ในโปรแกรมแล้วกดบันทึก")
+
+    def send_telegram(self, text):
+        """ยิงข้อความเข้า Telegram bot ทุกแชทในช่อง Chat ID — ใช้ urllib (ไม่ต้องลง requests เพิ่มตอน build exe)
+        คืน (ส่งถึงอย่างน้อย 1 แชท, error อันแรก) ไม่ throw เพราะห้ามให้แจ้งเตือนล้มแล้วลากการตอบแชทพังตาม"""
+        token = (getattr(self, 'telegram_token', '') or '').strip()
+        chat_ids = self.chat_id_list()
+        if not token or not chat_ids:
+            return False, "ยังไม่ได้ตั้งค่า Token หรือ Chat ID (ทักบอทใน Telegram 1 ข้อความ แล้วกดใหม่)"
 
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        data = urllib.parse.urlencode({'chat_id': chat_id, 'text': text}).encode('utf-8')
-        try:
-            with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=10) as resp:
-                return resp.status == 200, ""
-        except Exception as e:
-            return False, str(e)[:120]
+        sent, first_err = False, ""
+        for chat_id in chat_ids:
+            data = urllib.parse.urlencode({'chat_id': chat_id, 'text': text}).encode('utf-8')
+            # คนนึงบล็อกบอท/ออกจากกลุ่มไปแล้ว คนที่เหลือต้องได้แจ้งเตือนเหมือนเดิม
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=10) as resp:
+                    sent = sent or resp.status == 200
+            except Exception as e:
+                first_err = first_err or f"แชท {chat_id}: {str(e)[:100]}"
+        return sent, first_err
 
     def notify_new_chat(self, profile_name, product, status, listing_name="", message=""):
         """ส่งแจ้งเตือนแบบไม่บล็อก — การตอบแชทต้องเดินต่อได้แม้เน็ต Telegram ล่ม"""
-        if not (getattr(self, 'telegram_token', '') and getattr(self, 'telegram_chat_id', '')):
+        if not getattr(self, 'telegram_token', ''):
             return
         text = self.build_notify_text(profile_name, product, status, listing_name, message)
 
         def _worker():
+            self.add_new_telegram_chats()
             ok, err = self.send_telegram(text)
             if not ok and err:
                 print(f"telegram แจ้งเตือนไม่สำเร็จ: {err}")

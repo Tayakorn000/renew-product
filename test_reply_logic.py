@@ -65,6 +65,33 @@ def test_send_telegram_without_config_is_quiet():
     assert ok is False and "ยังไม่ได้ตั้งค่า" in err
 
 
+def test_people_who_message_the_bot_get_added():
+    def msg(chat_id, date, name="x"):
+        return {"message": {"chat": {"id": chat_id, "first_name": name}, "date": date}}
+
+    def member(chat_id, date, status):
+        return {"my_chat_member": {"chat": {"id": chat_id, "title": "กลุ่มร้าน"}, "date": date,
+                                   "new_chat_member": {"status": status}}}
+
+    payload = {"ok": True, "result": [
+        msg(111, 10), msg(222, 20, "พี่"), msg(222, 21, "พี่"),
+        member(333, 30, "kicked"), member(-100, 40, "member")]}
+    app.telegram_chat_id, app.telegram_seen = "111", 0
+
+    # คนเดิมไม่ซ้ำ คนที่เตะบอทออกไม่นับ ดึงบอทเข้ากลุ่มนับ
+    assert app.merge_telegram_chats(payload) == {"222": "พี่", "-100": "กลุ่มร้าน"}
+    assert app.chat_id_list() == ["111", "222", "-100"] and app.telegram_seen == 40
+
+    # ลบ 222 ออกจากช่องแล้ว ข้อความเก่าที่ยังค้างในคิว Telegram ต้องไม่ดึงกลับมา
+    app.telegram_chat_id = "111,-100"
+    assert app.merge_telegram_chats(payload) == {}
+    assert app.chat_id_list() == ["111", "-100"]
+
+    # ทักบอทมาใหม่ถึงจะกลับเข้ามา
+    assert app.merge_telegram_chats({"result": [msg(222, 50, "พี่")]}) == {"222": "พี่"}
+    assert app.merge_telegram_chats({"ok": False}) == {} and app.telegram_seen == 50
+
+
 def test_login_pending_url():
     # หน้ายืนยันตัวตนต้องนับว่า login ยังไม่เสร็จ ไม่งั้นบันทึก Cookie ครึ่งๆ กลางๆ
     assert app._is_login_pending_url("https://www.facebook.com/checkpoint/123") is True
@@ -217,6 +244,7 @@ if __name__ == "__main__":
     test_login_pending_url()
     test_notify_text_names_the_profile()
     test_send_telegram_without_config_is_quiet()
+    test_people_who_message_the_bot_get_added()
     test_cookie_skips_nameless()
     test_inbox_row_key_ignores_relative_time()
     test_preview_message_reads_what_customer_typed()
