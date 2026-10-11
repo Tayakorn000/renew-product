@@ -11,7 +11,10 @@ RUN curl -fsSLo /tmp/py.exe https://www.python.org/ftp/python/${PYTHON_VERSION}/
  && xvfb-run sh -c 'wine /tmp/py.exe /quiet TargetDir=C:\\Python InstallAllUsers=1 PrependPath=1 Include_doc=0 Include_test=0 Include_launcher=0; wineserver -w' \
  && rm /tmp/py.exe
 # psutil กับ pywin32 โปรแกรม import ในฟังก์ชัน ไม่ลง = exe ออกมาได้แต่ปิด Chrome ตอนออกโปรแกรมไม่ได้
-RUN wine 'C:\Python\python.exe' -m pip install --no-cache-dir pyinstaller selenium undetected-chromedriver psutil pywin32 \
+# เลขเวอร์ชันล็อกตาม exe ที่ลูกค้าใช้เปิด Chrome ได้จริงอยู่ (build จากเครื่อง Windows 2026-10-11)
+# ส่วนเปิด Chrome ลองใต้ Wine ไม่ได้ และอัปเดตอัตโนมัติแก้ไลบรารีใน exe ไม่ได้ จะขยับเลขต้องลองบน Windows จริงก่อน
+RUN wine 'C:\Python\python.exe' -m pip install --no-cache-dir pyinstaller psutil pywin32 \
+    selenium==4.48.0 undetected-chromedriver==3.5.5 urllib3==2.7.0 websockets==17.1 \
  && wineserver -w
 WORKDIR /src
 # ไฟล์ที่ได้เป็นของ root ถ้าไม่ chown คืน ลบโฟลเดอร์ build บนเครื่องจริงไม่ได้

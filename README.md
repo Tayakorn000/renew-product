@@ -50,7 +50,8 @@ ssh localhost@100.97.191.26 'rm -rf ~/build/renew-product'
 บรรทัดสุดท้ายห้ามข้าม ในโฟลเดอร์นั้นมี `telegram_default.py` ที่มี token อยู่
 
 เพิ่มไลบรารีใหม่ในโค้ด ต้องเพิ่มในบรรทัด `pip install` ของ `Dockerfile.wine` ด้วย
-exe ที่ได้ไม่มีไฟล์ของ Wine ปน (เทียบ DLL กับตัวที่ build จาก Windows แล้วตรงกัน) เปิดใต้ Wine ได้
+เวอร์ชัน selenium/urllib3/websockets ใน `Dockerfile.wine` ล็อกไว้ตาม exe ที่ build จากเครื่อง Windows เมื่อ 2026-10-11 (ตัวที่ลูกค้าใช้เปิด Chrome ได้อยู่)
+exe ที่ได้ไม่มีไฟล์ของ Wine ปน (เทียบ DLL กับตัวที่ build จาก Windows แล้วตรงกัน) เปิดใต้ Wine ได้ ดึงไฟล์จาก GitHub ได้
 แต่ส่วนที่เปิด Chrome ลองใต้ Wine ไม่ได้ ต้องลองบน Windows จริง
 
 ## อัปเดตอัตโนมัติ
