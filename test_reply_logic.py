@@ -6,6 +6,7 @@
 import importlib.util
 import io
 import os
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("renew_product", os.path.join(HERE, "Renew Product.py"))
@@ -107,6 +108,44 @@ def test_bot_poll_is_throttled():
     finally:
         renew_product.urllib.request.urlopen = real
         app.telegram_token = ""
+
+
+def test_exe_runs_newer_source_from_github():
+    tmp = tempfile.mkdtemp()
+    cache, ran = os.path.join(tmp, "renew_update.py"), os.path.join(tmp, "ran.txt")
+    newer = renew_product.APP_VERSION + 1
+    remote = {}
+
+    def fake(*a, **k):
+        if remote["src"] is None:
+            raise OSError("offline")
+        return io.BytesIO(remote["src"].encode("utf-8-sig"))  # ไฟล์จริงบน GitHub มี BOM
+
+    real_open, real_file = renew_product.urllib.request.urlopen, renew_product.UPDATE_FILE
+    renew_product.urllib.request.urlopen, renew_product.UPDATE_FILE = fake, cache
+    try:
+        # เวอร์ชันเท่าเดิม หรือได้หน้า error มาแทนไฟล์ = ไม่เก็บ ไม่รัน
+        remote["src"] = f"APP_VERSION = {renew_product.APP_VERSION}\n"
+        assert renew_product.run_update() is False and not os.path.exists(cache)
+        remote["src"] = "<html>404</html>"
+        assert renew_product.run_update() is False and not os.path.exists(cache)
+
+        # เวอร์ชันใหม่กว่า = รันตัวใหม่ และบอกตัวใหม่ว่าไม่ต้องเช็คอัปเดตซ้ำ
+        remote["src"] = f"APP_VERSION = {newer}\nopen({ran!r}, 'w').write(str(UPDATED))\n"
+        assert renew_product.run_update() is True and open(ran).read() == "True"
+
+        # เน็ตล่มรอบถัดไป ยังได้ตัวใหม่จากไฟล์ที่เก็บไว้
+        os.remove(ran)
+        remote["src"] = None
+        assert renew_product.run_update() is True and os.path.exists(ran)
+
+        # ตัวใหม่ใช้ไลบรารีที่ exe ไม่มี หรือไฟล์ขาดกลาง = ถอยไปใช้ตัวที่ฝังมา
+        remote["src"] = f"APP_VERSION = {newer}\nimport no_such_module_xyz\n"
+        assert renew_product.run_update() is False
+        remote["src"] = f"APP_VERSION = {newer}\ndef broken(:\n"
+        assert renew_product.run_update() is False
+    finally:
+        renew_product.urllib.request.urlopen, renew_product.UPDATE_FILE = real_open, real_file
 
 
 def test_login_pending_url():
@@ -263,6 +302,7 @@ if __name__ == "__main__":
     test_send_telegram_without_config_is_quiet()
     test_people_who_message_the_bot_get_added()
     test_bot_poll_is_throttled()
+    test_exe_runs_newer_source_from_github()
     test_cookie_skips_nameless()
     test_inbox_row_key_ignores_relative_time()
     test_preview_message_reads_what_customer_typed()

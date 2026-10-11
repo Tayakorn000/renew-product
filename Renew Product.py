@@ -13,6 +13,7 @@ except ImportError:
     uc = By = WebDriverWait = EC = ActionChains = Keys = None
 import time
 import os
+import sys
 import re
 import configparser
 import threading
@@ -31,6 +32,12 @@ try:
 except Exception:
     DEFAULT_TELEGRAM_TOKEN = ''
     DEFAULT_TELEGRAM_CHAT_ID = ''
+
+# เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
+# ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
+APP_VERSION = 1
+UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
+UPDATE_FILE = "renew_update.py"
 
 class FacebookMarketplaceRenewer:
     IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
@@ -69,7 +76,7 @@ class FacebookMarketplaceRenewer:
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("ต่ออายุสินค้า Facebook Marketplace")
+        self.root.title(f"ต่ออายุสินค้า Facebook Marketplace v{APP_VERSION}")
         self.root.geometry("600x650")
         self.root.resizable(False, False)
         
@@ -3331,6 +3338,51 @@ class FacebookMarketplaceRenewer:
     def run(self):
         self.root.mainloop()
 
+
+def source_version(src):
+    """เลข APP_VERSION ในโค้ดที่โหลดมา (หาไม่เจอ = 0 ถือว่าไม่ใช่ไฟล์โปรแกรม ไม่เอามารัน)"""
+    m = re.search(r'^APP_VERSION\s*=\s*(\d+)', src, re.MULTILINE)
+    return int(m.group(1)) if m else 0
+
+
+def load_update():
+    """โค้ดเวอร์ชันใหม่กว่าที่ฝังใน exe (compile แล้ว) — ไม่มี/โหลดไม่ได้/ไฟล์พัง = None
+    โหลดได้ก็เก็บลงไฟล์ไว้ เน็ตล่มรอบหน้าจะได้ไม่ถอยกลับไปตัวเก่าที่ฝังมา"""
+    try:
+        with urllib.request.urlopen(UPDATE_URL, timeout=10) as resp:
+            src = resp.read().decode('utf-8-sig')
+        if source_version(src) > APP_VERSION:
+            # เขียนไฟล์ชั่วคราวแล้วค่อยสลับ ไฟดับกลางคันจะได้ไม่เหลือไฟล์ครึ่งเดียวที่รันแล้วไม่มีหน้าต่างขึ้น
+            with open(UPDATE_FILE + '.part', 'w', encoding='utf-8', newline='') as f:
+                f.write(src)
+            os.replace(UPDATE_FILE + '.part', UPDATE_FILE)
+    except Exception:
+        pass
+    try:
+        with open(UPDATE_FILE, encoding='utf-8', newline='') as f:
+            src = f.read()
+        if source_version(src) > APP_VERSION:
+            return compile(src, UPDATE_FILE, 'exec')
+    except Exception:
+        pass
+    return None
+
+
+def run_update():
+    """รันโค้ดตัวใหม่แทนตัวที่ฝังใน exe — คืน False ถ้าไม่มีตัวใหม่ หรือตัวใหม่เปิดไม่ขึ้น (ให้ใช้ตัวที่ฝังมา)"""
+    # ponytail: อัปเดตได้แค่ไฟล์นี้ โค้ดใหม่ import ไลบรารีที่ exe ไม่ได้ฝังมา = ต้อง build exe ใหม่
+    code = load_update()
+    if not code:
+        return False
+    try:
+        exec(code, {'__name__': '__main__', 'UPDATED': True})
+        return True
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
-    app = FacebookMarketplaceRenewer()
-    app.run()
+    # exe เท่านั้นที่อัปเดตตัวเอง รันจาก .py ตรงๆ (ตอนแก้โค้ด) ต้องได้โค้ดในเครื่อง
+    if globals().get('UPDATED') or not getattr(sys, 'frozen', False) or not run_update():
+        app = FacebookMarketplaceRenewer()
+        app.run()
