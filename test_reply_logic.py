@@ -298,6 +298,306 @@ def test_scan_product_folders(tmp_root="/tmp/_reply_scan_test"):
     shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+# ---- ลูปตอบแชทกับ Chrome ปลอม (ไม่มี Selenium ไม่มีเน็ต ไม่มี sleep) ----
+# เช็คได้แค่ว่า "เจอ element แล้วโปรแกรมทำอะไรต่อ" ส่วน selector หา element บนหน้า Facebook จริงเจอไหม ยังต้อง live-test
+
+class FakeEl:
+    def __init__(self, text="", href=None):
+        self.text, self.href, self.keys = text, href, []
+
+    def get_attribute(self, name):
+        return self.href
+
+    def send_keys(self, *keys):
+        self.keys.extend(keys)
+
+    def click(self):
+        pass
+
+
+class FakeDriver:
+    def __init__(self, cookies=()):
+        self.current_url, self.visited, self.cdp, self.cookies, self.closed = "", [], [], list(cookies), False
+
+    def get(self, url):
+        self.visited.append(url)
+        self.current_url = url
+
+    def execute_cdp_cmd(self, cmd, params):
+        self.cdp.append((cmd, params))
+
+    def execute_script(self, *args):
+        pass
+
+    def get_cookies(self):
+        return self.cookies
+
+    def quit(self):
+        self.closed = True
+
+
+class FakeList:
+    def __init__(self):
+        self.items = []
+
+    def delete(self, *args):
+        self.items = []
+
+    def insert(self, where, label):
+        self.items.append(label)
+
+    def curselection(self):
+        return (0,)
+
+
+class SyncThread:
+    """แทน threading.Thread ให้ start() รันจบตรงนั้นเลย เทสจะได้ไม่ต้องรอ"""
+    def __init__(self, target, args=(), daemon=None):
+        self.target, self.args = target, args
+
+    def start(self):
+        self.target(*self.args)
+
+
+FOLDERS = {"โช๊คหลัง PCX": {
+    "main": {"images": [], "videos": [], "text": "ราคา 500\n\nส่งฟรี"},
+    "review": {"images": ["r1.jpg", "r2.jpg"], "videos": [], "text": ""},
+    "extra": None,
+}}
+THREAD = "https://www.facebook.com/marketplace/t/%s/"
+
+
+def reply_app():
+    import types
+    renew_product.time.sleep = lambda s: None
+    renew_product.Keys = types.SimpleNamespace(RETURN="<ENTER>", CONTROL="", DELETE="")
+    a = App.__new__(App)
+    a.reply_state = {"ID7": {}}
+    a.stage_enabled = dict(App.DEFAULT_STAGE_ENABLED)
+    a.reply_settings_file = os.path.join(tempfile.mkdtemp(), "reply_settings.json")
+    a.reply_root_folder = None
+    a.auto_reply_active = True
+    a.driver_locks = {}
+    a.notes, a.statuses, a.found = [], [], {}
+    a.notify_new_chat = lambda profile, product, status, listing_name="", message="": a.notes.append((status, message))
+    a.update_status = lambda text, color: a.statuses.append(text)
+    a.wait_for_page_load = lambda d: None
+    a.random_sleep = lambda *x: None
+    a.root = types.SimpleNamespace(after=lambda ms, fn=None: None)
+    a.find_all = lambda d, key, context=None: a.found.get(key, [])
+    a.find_first = lambda d, key, context=None, wait=0: (a.found.get(key) or [None])[0]
+    return a
+
+
+def test_never_says_replied_when_nothing_was_sent():
+    a, drv = reply_app(), FakeDriver()
+    a.found = {"incoming_bubble": [FakeEl()], "listing_title": [FakeEl("โช๊คหลัง PCX แต่งศูนย์")]}
+
+    # หาช่องพิมพ์ไม่เจอ = ลูกค้าไม่ได้อะไรเลย ต้องแจ้งว่าส่งไม่สำเร็จ ไม่ใช่ "ตอบอัตโนมัติให้แล้ว"
+    a.handle_one_conversation("ID7", drv, THREAD % 111, "111", FOLDERS, "k", "จ่ายปลายทางได้มั้ย")
+    assert a.reply_state["ID7"]["111"]["status"] == "failed"
+    assert a.notes == [("send_failed", "จ่ายปลายทางได้มั้ย")]
+
+    # ส่งออก = จดว่าตอบแล้ว แจ้งพร้อมข้อความที่ลูกค้าพิมพ์ และพิมพ์ครบ 2 ย่อหน้า กด Enter 2 ที
+    box = FakeEl()
+    a.found["message_box"] = [box]
+    a.handle_one_conversation("ID7", drv, THREAD % 222, "222", FOLDERS, "k", "สนใจครับ")
+    info = a.reply_state["ID7"]["222"]
+    assert (info["status"], info["stage"], info["row_key"], info["just_sent"]) == ("replied", 1, None, True)
+    assert a.notes[-1] == ("replied", "สนใจครับ")
+    assert "".join(box.keys) == "ราคา 500<ENTER>ส่งฟรี<ENTER>"
+
+    # ลูกค้าพิมพ์มาอีกในแชทที่ส่งไม่ออก ยังต้องแจ้ง (เดิมเงียบ)
+    failed = a.reply_state["ID7"]["111"]
+    assert a.handle_followup("ID7", drv, "111", FOLDERS, failed, "k1", "") is False and len(a.notes) == 2
+    a.handle_followup("ID7", drv, "111", FOLDERS, failed, "k2", "ยังอยู่ไหม")
+    assert a.notes[-1] == ("send_failed", "ยังอยู่ไหม")
+
+
+def test_folder_with_only_pictures_is_actually_sent():
+    a, drv = reply_app(), FakeDriver()
+    picker, box = FakeEl(), FakeEl()
+    a.found = {"file_input": [picker], "message_box": [box]}
+
+    # แนบรูปอย่างเดียวยังไม่ถูกส่ง ต้องมี Enter ตาม (โฟลเดอร์รีวิว/รูปเพิ่มเติมไม่มี .txt มากด Enter ให้)
+    assert a.send_folder_content(drv, FOLDERS["โช๊คหลัง PCX"]["review"]) is True
+    assert picker.keys == ["r1.jpg\nr2.jpg"] and box.keys == ["<ENTER>"]
+
+    a.found = {"file_input": [picker]}
+    assert a.send_folder_content(drv, FOLDERS["โช๊คหลัง PCX"]["review"]) is False
+
+
+def test_followup_failure_does_not_advance_or_claim_sent():
+    a, drv = reply_app(), FakeDriver()
+    a.stage_enabled["review"] = True
+    info = {"product": "โช๊คหลัง PCX", "status": "replied", "stage": 1, "row_key": "k0"}
+
+    # ลูกค้าทักกลับ แต่ส่งรีวิวไม่ออก: stage ต้องอยู่ที่เดิม และแจ้งว่าไม่สำเร็จ
+    assert a.handle_followup("ID7", drv, "111", FOLDERS, info, "k1", "มีรีวิวไหม") is True
+    assert info["stage"] == 1 and a.notes == [("send_failed", "มีรีวิวไหม")]
+
+    a.found = {"file_input": [FakeEl()], "message_box": [FakeEl()]}
+    info["row_key"] = "k0"
+    a.handle_followup("ID7", drv, "111", FOLDERS, info, "k1", "มีรีวิวไหม")
+    assert info["stage"] == 2 and info["just_sent"] is True and a.notes[-1][0] == "followup"
+
+
+def test_ongoing_chat_is_remembered_and_reported_once_new():
+    a, drv = reply_app(), FakeDriver()
+    a.found = {"incoming_bubble": [FakeEl(), FakeEl()], "listing_title": [FakeEl("โช๊คหลัง PCX")]}
+
+    # แชทที่ค้างอยู่ก่อนเปิดโปรแกรม: จดไว้เฉยๆ ไม่ตอบ ไม่แจ้ง (ไม่งั้นเปิดโปรแกรมทีเด้งเป็นสิบ)
+    a.handle_one_conversation("ID7", drv, THREAD % 111, "111", FOLDERS, "k0", "ของยังอยู่ไหม", is_new=False)
+    info = a.reply_state["ID7"]["111"]
+    assert info["status"] == "old" and a.notes == []
+
+    # จดแล้วรอบหน้าไม่เปิดแชทนี้ซ้ำ และพอลูกค้าพิมพ์มาใหม่ต้องแจ้ง
+    assert a.handle_followup("ID7", drv, "111", FOLDERS, info, "k0", "ของยังอยู่ไหม") is False
+    assert a.notes == [] and drv.visited == [THREAD % 111]
+    a.handle_followup("ID7", drv, "111", FOLDERS, info, "k1", "ลดได้ไหม")
+    assert a.notes == [("old_chat", "ลดได้ไหม")]
+
+    # แชทที่โผล่มาระหว่างโปรแกรมเปิดอยู่ แต่ลูกค้าพิมพ์รัว 2 ข้อความก่อนรอบสแกน: ไม่ตอบทับ แต่ต้องแจ้ง
+    a.handle_one_conversation("ID7", drv, THREAD % 222, "222", FOLDERS, "k", "ลดได้ไหม", is_new=True)
+    assert a.notes[-1] == ("old_chat", "ลดได้ไหม")
+
+    # แชทเก่าไม่ต้องโชว์ในรายการ "แชทที่ตอบไปแล้ว"
+    a.reply_listbox = FakeList()
+    a.update_reply_list()
+    assert a.reply_listbox.items == [] and a._reply_list_index == []
+
+
+def test_quick_reply_after_our_message_is_not_swallowed():
+    a, drv = reply_app(), FakeDriver()
+
+    # เราเพิ่งส่งไป ลูกค้าตอบกลับก่อนรอบสแกนถัดไป: ต้องแจ้ง ไม่ใช่เก็บเป็นฐานเทียบเงียบๆ
+    info = {"product": "โช๊คหลัง PCX", "status": "replied", "stage": 1, "row_key": None, "just_sent": True}
+    assert a.handle_followup("ID7", drv, "111", FOLDERS, info, "k1", "จ่ายปลายทางได้มั้ย") is False
+    assert a.notes == [("quick_reply", "จ่ายปลายทางได้มั้ย")]
+    assert info["row_key"] == "k1" and "just_sent" not in info and drv.visited == []
+
+    # ข้อความล่าสุดเป็นของเราเอง (preview ว่าง) = ยังไม่มีใครตอบ ไม่แจ้ง
+    info = {"product": "โช๊คหลัง PCX", "status": "replied", "stage": 1, "row_key": None, "just_sent": True}
+    a.handle_followup("ID7", drv, "111", FOLDERS, info, "k1", "")
+    assert len(a.notes) == 1
+    assert app.preview_message("สมชาย\nคุณส่งรูปภาพ 3 รูป · 1 นาที") == ""
+
+    # ประวัติเก่าจากโปรแกรมรุ่นก่อน (ไม่มี just_sent): รอบแรกเก็บฐานอย่างเดียว ห้ามแจ้ง ห้ามส่ง
+    old = {"product": "โช๊คหลัง PCX", "status": "replied", "stage": 1}
+    a.handle_followup("ID7", drv, "111", FOLDERS, old, "k1", "ข้อความเมื่ออาทิตย์ก่อน")
+    assert len(a.notes) == 1 and old["row_key"] == "k1"
+
+
+def test_scan_notices_logout_and_which_chats_are_new():
+    a, drv = reply_app(), FakeDriver()
+    a.found = {"conversation_row": [
+        FakeEl("สมชาย\nสนใจครับ · 2 นาที", THREAD % 999),
+        FakeEl("สมชาย\nสนใจครับ · 2 นาที", THREAD % 999),
+        FakeEl("ลิงก์อื่น", "https://www.facebook.com/marketplace/item/5/")]}
+    seen = []
+    a.handle_one_conversation = lambda p, d, href, tid, f, key, preview, is_new: seen.append((tid, preview, is_new))
+
+    assert a.scan_inbox_once("ID7", drv, FOLDERS, first_pass=True) is True
+    assert a.scan_inbox_once("ID7", drv, FOLDERS, first_pass=False) is True
+    assert seen == [("999", "สนใจครับ", False), ("999", "สนใจครับ", True)]
+
+    # หลุด Login: inbox เด้งไปหน้า login แถวแชทเป็น 0 ต้องบอกว่าไม่ได้อ่าน ไม่ใช่ "ไม่มีลูกค้าทัก"
+    drv.get = lambda url: setattr(drv, "current_url", "https://www.facebook.com/login/?next=inbox")
+    assert a.scan_inbox_once("ID7", drv, FOLDERS, first_pass=False) is False
+
+
+def test_worker_reports_a_profile_that_stopped_watching():
+    a, drv = reply_app(), FakeDriver()
+    problems, calls = [], []
+    a.notify_problem = lambda profile, problem: problems.append(problem)
+
+    def scan(profile, driver, folders, first_pass):
+        calls.append(first_pass)
+        if len(calls) == 3:
+            a.auto_reply_active = False
+        return False  # หลุด Login ทุกรอบ
+    a.scan_inbox_once = scan
+
+    a.auto_reply_worker("ID7", drv, FOLDERS)
+    # แจ้งครั้งเดียวตอนเพิ่งหลุด ไม่ยิงซ้ำทุกรอบ และรอบแรกยังไม่จบ (first_pass ค้างไว้จนกว่าจะอ่านได้จริง)
+    assert len(problems) == 1 and "Login" in problems[0] and calls == [True, True, True] and drv.closed
+
+    class Dead(FakeDriver):
+        @property
+        def current_url(self):
+            raise RuntimeError("chrome gone")
+
+        @current_url.setter
+        def current_url(self, value):
+            pass
+
+    a.auto_reply_active, problems[:] = True, []
+    a.auto_reply_worker("ID7", Dead(), FOLDERS)
+    assert len(problems) == 1 and "Chrome" in problems[0]
+
+
+def test_manual_send_waits_its_turn_and_reports_failure():
+    a, drv = reply_app(), FakeDriver()
+    real_thread = renew_product.threading.Thread
+    renew_product.threading.Thread = SyncThread
+    try:
+        info = {"product": "โช๊คหลัง PCX", "status": "replied", "stage": 1, "row_key": "k0"}
+        a.reply_state["ID7"]["111"] = info
+        a.reply_listbox, a._reply_list_index = FakeList(), [("ID7", "111")]
+        a.reply_drivers = {"ID7": drv}
+        a.scan_product_folders = lambda root: FOLDERS
+
+        a.manual_send_category("review")  # ไม่มีช่องแนบไฟล์ = ส่งไม่ออก
+        assert info["stage"] == 1 and "ไม่สำเร็จ" in a.statuses[-1]
+
+        a.found = {"file_input": [FakeEl()], "message_box": [FakeEl()]}
+        a.manual_send_category("review")
+        assert info["stage"] == 2 and info["row_key"] is None and drv.visited[-1] == THREAD % 111
+        assert not a.driver_locks["ID7"].locked()
+    finally:
+        renew_product.threading.Thread = real_thread
+
+
+def test_logged_out_cookies_never_overwrite_the_ini():
+    path = os.path.join(tempfile.mkdtemp(), "ID7.ini")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("[FBAccount]\nUserID = a\nCookies = OLDGOOD\n")
+
+    try:
+        app._save_cookies_to_ini(FakeDriver([{"name": "datr", "value": "x"}]), path, force=True)
+        raise AssertionError("ต้องไม่ยอมบันทึก Cookie ตอนยังไม่ได้ Login")
+    except Exception as e:
+        assert "Login" in str(e)
+    assert "OLDGOOD" in open(path, encoding="utf-8").read()
+
+    app._save_cookies_to_ini(FakeDriver([{"name": "c_user", "value": "1"}, {"name": "xs", "value": "2"}]), path, force=True)
+    saved = open(path, encoding="utf-8").read()
+    assert "OLDGOOD" not in saved and "UserID = a" in saved and app._read_cookies_from_ini(path)
+
+
+def test_typing_emoji_does_not_break_the_message():
+    reply_app()
+    el, drv = FakeEl(), FakeDriver()
+    app.human_like_type(el, "ดี🔥", drv)
+    assert el.keys == ["ด", "ี"] and drv.cdp == [("Input.insertText", {"text": "🔥"})]
+
+
+def test_reply_settings_file_is_replaced_whole():
+    import json
+    a = reply_app()
+    a.reply_state = {"ID7": {"111": {"product": "โช๊คหลัง PCX", "status": "old"}}}
+    a.save_reply_settings()
+    folder = os.path.dirname(a.reply_settings_file)
+    assert os.listdir(folder) == ["reply_settings.json"]
+    assert json.load(open(a.reply_settings_file, encoding="utf-8"))["state"]["ID7"]["111"]["status"] == "old"
+
+
+def test_new_notify_statuses_have_their_own_wording():
+    texts = {s: app.build_notify_text("ID7", "โช๊คหลัง PCX", s) for s in ("send_failed", "quick_reply", "old_chat")}
+    assert "ไม่สำเร็จ" in texts["send_failed"] and "ตอบกลับมา" in texts["quick_reply"] and "คุยกันอยู่แล้ว" in texts["old_chat"]
+    assert all("จับคู่สินค้าไม่ได้" not in t and "เฟส: ID7" in t for t in texts.values())
+
+
 if __name__ == "__main__":
     test_strip_leading_number()
     test_match_exact_one()
@@ -328,4 +628,16 @@ if __name__ == "__main__":
     test_followup_skips_unmatched_thread()
     test_split_text_to_messages()
     test_scan_product_folders()
+    test_never_says_replied_when_nothing_was_sent()
+    test_folder_with_only_pictures_is_actually_sent()
+    test_followup_failure_does_not_advance_or_claim_sent()
+    test_ongoing_chat_is_remembered_and_reported_once_new()
+    test_quick_reply_after_our_message_is_not_swallowed()
+    test_scan_notices_logout_and_which_chats_are_new()
+    test_worker_reports_a_profile_that_stopped_watching()
+    test_manual_send_waits_its_turn_and_reports_failure()
+    test_logged_out_cookies_never_overwrite_the_ini()
+    test_typing_emoji_does_not_break_the_message()
+    test_reply_settings_file_is_replaced_whole()
+    test_new_notify_statuses_have_their_own_wording()
     print("OK")

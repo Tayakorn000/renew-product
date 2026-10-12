@@ -35,7 +35,7 @@ except Exception:
 
 # เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
 # ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
-APP_VERSION = 1
+APP_VERSION = 2
 UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
 UPDATE_FILE = "renew_update.py"
 
@@ -64,8 +64,8 @@ class FacebookMarketplaceRenewer:
     RENEW_PAGE_URL = "https://www.facebook.com/marketplace/selling/renew_listings/"
     DEFAULT_RENEW_INTERVAL_MIN = 30
 
-    # FB เติมคำนำหน้าใน preview เมื่อข้อความล่าสุดเป็นของเราเอง
-    PREVIEW_SELF_PREFIXES = ('คุณ:', 'you:')
+    # FB เติมคำนำหน้าใน preview เมื่อข้อความล่าสุดเป็นของเราเอง ("คุณ: ..." / "คุณส่งรูปภาพ")
+    PREVIEW_SELF_PREFIXES = ('คุณ:', 'you:', 'คุณส่ง', 'you sent')
 
     # ตัวเลข/คำบอกเวลาใน preview ของแถว inbox ("2 นาที", "6 ต.ค.") ขยับเองแม้ไม่มีข้อความใหม่
     # ตัดออกก่อนเทียบ — ตัดเกินดีกว่าตัดขาด เพราะตัดขาด = ส่งรีวิวทับลูกค้าที่ไม่ได้ทักอะไร
@@ -77,9 +77,8 @@ class FacebookMarketplaceRenewer:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(f"ต่ออายุสินค้า Facebook Marketplace v{APP_VERSION}")
-        self.root.geometry("600x650")
-        self.root.resizable(False, False)
-        
+        # ไม่ล็อกขนาดหน้าต่าง ปล่อยให้พอดีของข้างใน เคยล็อก 600x650 แล้วของสูง 825 ครึ่งล่างโดนตัดมองไม่เห็น
+
         self.is_running = False
         self.settings_file = "renew_settings.json"
         self.profiles = {}
@@ -99,6 +98,8 @@ class FacebookMarketplaceRenewer:
         self.telegram_seen = 0  # เวลาของข้อความล่าสุดที่คนทักบอท ที่เก็บเข้าช่อง Chat ID ไปแล้ว
         self.auto_reply_active = False
         self.reply_drivers = {}  # profile_name -> driver ที่ยังเปิดอยู่ระหว่างตอบแชท
+        # Chrome 1 ตัวโดน 2 thread สั่งพร้อมกันไม่ได้ (ลูปเฝ้าแชท กับ ปุ่มส่งด้วยมือ) ไม่งั้นส่งผิดห้องแชท
+        self.driver_locks = {}  # profile_name -> Lock
         self._reply_list_index = []  # index ของ reply_listbox -> (profile_name, thread_id)
 
         # ตั้งค่าให้ปิด Chrome ทั้งหมดเมื่อปิดหน้าต่าง GUI
@@ -116,6 +117,8 @@ class FacebookMarketplaceRenewer:
         try:
             # แสดง messagebox ยืนยัน
             if messagebox.askokcancel("ปิดโปรแกรม", "ต้องการปิดโปรแกรมและ Chrome ทั้งหมดหรือไม่?"):
+                # บอกลูปเฝ้าแชทว่าตั้งใจปิด ไม่งั้นมันเห็น Chrome หายแล้วยิงแจ้งเตือนว่าเฟสมีปัญหา
+                self.auto_reply_active = False
                 # ปิด Chrome ทั้งหมด
                 self.close_all_chrome()
                 
@@ -202,8 +205,12 @@ class FacebookMarketplaceRenewer:
         
         # พิมพ์ทีละตัวอักษรด้วยความเร็วสุ่มที่หลากหลาย
         for i, char in enumerate(text):
-            element.send_keys(char)
-            
+            # ChromeDriver พิมพ์ได้แค่ตัวอักษรใน BMP เจออีโมจิอย่าง 🔥 send_keys พังกลางข้อความ เลยแทรกผ่าน CDP แทน
+            if ord(char) > 0xFFFF:
+                driver.execute_cdp_cmd('Input.insertText', {'text': char})
+            else:
+                element.send_keys(char)
+
             # ความเร็วพิมพ์แปรผันตามตำแหน่ง
             if i == 0:
                 time.sleep(random.uniform(0.15, 0.35))  # ตัวแรกช้าหน่อย
@@ -604,8 +611,11 @@ class FacebookMarketplaceRenewer:
                     'renew_interval_min': getattr(self, 'renew_interval_min', self.DEFAULT_RENEW_INTERVAL_MIN),
                 }
                 text = json.dumps(data, ensure_ascii=False, indent=2)
-                with open(self.reply_settings_file, 'w', encoding='utf-8') as f:
+                # เขียนไฟล์ชั่วคราวแล้วสลับ ปิดโปรแกรมกลางคันจะได้ไม่เหลือไฟล์ขาดครึ่ง (โหลดไม่ขึ้น = ประวัติแชทหาย)
+                tmp = self.reply_settings_file + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as f:
                     f.write(text)
+                os.replace(tmp, self.reply_settings_file)
         except Exception:
             pass
 
@@ -617,9 +627,26 @@ class FacebookMarketplaceRenewer:
             font=("Arial", 14, "bold")
         )
         title_label.pack(pady=10)
-        
+
+        # สถานะ — pack ก่อนแบบติดขอบล่าง จอเตี้ยแค่ไหนบรรทัดนี้ก็ไม่โดนตัด (เป็นที่เดียวที่บอกว่าโปรแกรมทำอะไรอยู่)
+        self.status_label = tk.Label(
+            self.root,
+            text="พร้อมใช้งาน",
+            font=("Arial", 9),
+            fg="gray"
+        )
+        self.status_label.pack(side=tk.BOTTOM, pady=5)
+
+        # 2 คอลัมน์: ซ้ายจัดการ Profile + ต่ออายุ ขวาตอบแชท — เรียงลงมาแถวเดียวสูงเกินจอโน้ตบุ๊ก
+        body = tk.Frame(self.root)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = tk.Frame(body)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right = tk.Frame(body)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
         # กรอบจัดการ Profile
-        profile_frame = tk.LabelFrame(self.root, text="จัดการ Profile", font=("Arial", 10, "bold"), padx=10, pady=10)
+        profile_frame = tk.LabelFrame(left, text="จัดการ Profile", font=("Arial", 10, "bold"), padx=10, pady=10)
         profile_frame.pack(pady=5, padx=20, fill=tk.BOTH, expand=True)
         
         # รายการ Profile พร้อม Checkbox
@@ -762,7 +789,7 @@ class FacebookMarketplaceRenewer:
         add_btn.pack(pady=8)
         
         # ปุ่มเริ่มต้น (ย้ายออกมานอก frame)
-        button_frame = tk.Frame(self.root)
+        button_frame = tk.Frame(left)
         button_frame.pack(pady=10, fill=tk.X, padx=20)
         
         self.start_button = tk.Button(
@@ -779,7 +806,7 @@ class FacebookMarketplaceRenewer:
         self.start_button.pack(fill=tk.X)
 
         # กรอบตอบแชทลูกค้าอัตโนมัติ (Marketplace inbox) — ใช้ Profile ที่เลือกด้านบนร่วมกัน
-        reply_frame = tk.LabelFrame(self.root, text="ตอบแชทลูกค้าอัตโนมัติ (Marketplace)", font=("Arial", 10, "bold"), padx=10, pady=10)
+        reply_frame = tk.LabelFrame(right, text="ตอบแชทลูกค้าอัตโนมัติ (Marketplace)", font=("Arial", 10, "bold"), padx=10, pady=10)
         reply_frame.pack(pady=5, padx=20, fill=tk.BOTH, expand=True)
 
         folder_row = tk.Frame(reply_frame)
@@ -875,15 +902,6 @@ class FacebookMarketplaceRenewer:
             font=("Arial", 9), cursor="hand2"
         ).pack(side=tk.LEFT)
 
-        # สถานะ
-        self.status_label = tk.Label(
-            self.root,
-            text="พร้อมใช้งาน",
-            font=("Arial", 9),
-            fg="gray"
-        )
-        self.status_label.pack(pady=5)
-        
         # อัปเดต Listbox
         self.update_profile_list()
         self.update_reply_list()
@@ -1676,6 +1694,12 @@ class FacebookMarketplaceRenewer:
             lines.append("สถานะ: ลูกค้าทักกลับมา แต่หาโฟลเดอร์สินค้านี้ไม่เจอแล้ว ต้องตอบเอง")
         elif status == 'unmatched_again':
             lines.append("สถานะ: ลูกค้าทักมาอีก จับคู่สินค้าไม่ได้ตั้งแต่แรก ต้องตอบเอง")
+        elif status == 'send_failed':
+            lines.append("สถานะ: โปรแกรมส่งข้อมูลให้ลูกค้าไม่สำเร็จ ต้องตอบเอง")
+        elif status == 'quick_reply':
+            lines.append("สถานะ: ลูกค้าตอบกลับมาหลังได้ข้อมูล ยังไม่ได้ตอบต่อ ต้องตอบเอง")
+        elif status == 'old_chat':
+            lines.append("สถานะ: ลูกค้าพิมพ์มาในแชทที่คุยกันอยู่แล้ว ไม่ได้ตอบออโต้ ต้องตอบเอง")
         elif status == 'main_off':
             lines.append("สถานะ: ปิดตอบออโต้ด้วยแชทหลักไว้ ยังไม่ได้ส่งอะไร ต้องตอบเอง")
         elif status == 'followup_off':
@@ -1779,10 +1803,18 @@ class FacebookMarketplaceRenewer:
         def _worker():
             self.add_new_telegram_chats()
             ok, err = self.send_telegram(text)
-            if not ok and err:
-                print(f"telegram แจ้งเตือนไม่สำเร็จ: {err}")
+            # exe ไม่มีหน้า CMD ให้ดู print ไปก็ไม่มีใครเห็น ต้องขึ้นบรรทัดสถานะ
+            if err:
+                self.update_status(f"แจ้งเตือน Telegram ไม่สำเร็จ: {err}", "red")
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def notify_problem(self, profile_name, problem):
+        """เฟสนี้เลิกเฝ้าแชทเองโดยไม่มีใครสั่ง — ไม่แจ้ง = เจ้าของนึกว่ายังเฝ้าอยู่ ลูกค้าทักมาก็เงียบ"""
+        self.update_status(f"{profile_name}: {problem}", "red")
+        text = "\n".join(["โปรแกรมมีปัญหา", f"เฟส: {profile_name}", problem,
+                          f"เวลา: {time.strftime('%d/%m/%Y %H:%M')}"])
+        threading.Thread(target=self.send_telegram, args=(text,), daemon=True).start()
 
     def _is_login_pending_url(self, url):
         """URL ที่ยังถือว่า Login ไม่เสร็จ — หน้า login เอง หรือหน้ายืนยันตัวตนของ Facebook"""
@@ -1898,6 +1930,9 @@ class FacebookMarketplaceRenewer:
         all_cookies = driver.get_cookies()
         if not all_cookies:
             return
+        # ไม่มี c_user = ยังไม่ได้ Login จริง เขียนลงไปคือเอา Cookie เปล่าทับของเดิมในไฟล์ .ini ของลูกค้า
+        if not any(c.get('name') == 'c_user' for c in all_cookies):
+            raise Exception("ยัง Login ไม่สำเร็จ ไม่บันทึก Cookie")
 
         cookies_json_str = json.dumps(all_cookies, ensure_ascii=False)
         cookies_b64 = base64.b64encode(cookies_json_str.encode('utf-8')).decode('ascii')
@@ -2942,15 +2977,33 @@ class FacebookMarketplaceRenewer:
             return False
 
     def send_folder_content(self, driver, assets):
-        """ส่งรูป+วิดีโอก่อน แล้วค่อยส่งข้อความจาก .txt ทีละย่อหน้า"""
+        """ส่งรูป+วิดีโอก่อน แล้วค่อยส่งข้อความจาก .txt ทีละย่อหน้า
+        คืน False ถ้ามีชิ้นไหนส่งไม่ออก — ผู้เรียกห้ามบอกเจ้าของว่า "ตอบให้แล้ว" ทั้งที่ลูกค้าไม่ได้อะไร"""
+        ok = True
         media_files = assets.get('images', []) + assets.get('videos', [])
         if media_files:
-            self.upload_files_to_chat(driver, media_files)
+            ok = self.upload_files_to_chat(driver, media_files) and ok
+            # แนบไฟล์เฉยๆ ยังไม่ถูกส่ง ต้องกด Enter — โฟลเดอร์ที่มีแต่รูป (ไม่มี .txt ตามมากด Enter ให้) ไม่เคยถูกส่งเลย
+            ok = self.press_send(driver) and ok
             self.random_sleep(2, 5)
 
         for msg in self.split_text_to_messages(assets.get('text', '')):
-            self.send_chat_message(driver, msg)
+            ok = self.send_chat_message(driver, msg) and ok
             self.random_sleep(2, 6)
+        return ok
+
+    def press_send(self, driver):
+        """กด Enter ในช่องพิมพ์ เพื่อส่งของที่แนบค้างอยู่"""
+        box = self.find_first(driver, 'message_box', wait=5)
+        if not box:
+            self.update_status("ไม่พบช่องพิมพ์ข้อความ (message_box) - ต้องปรับ selector", "red")
+            return False
+        try:
+            box.send_keys(Keys.RETURN)
+            return True
+        except Exception as e:
+            self.update_status(f"กดส่งไฟล์ไม่สำเร็จ: {str(e)[:80]}", "red")
+            return False
 
     def browse_reply_folder(self):
         """เลือกโฟลเดอร์แม่ที่รวมโฟลเดอร์สินค้าทั้งหมด (แต่ละสินค้า = 1 โฟลเดอร์ย่อย)"""
@@ -2964,9 +3017,14 @@ class FacebookMarketplaceRenewer:
         """อัปเดตรายการ 'แชทที่ตอบไปแล้ว' ใน Listbox จาก self.reply_state"""
         self.reply_listbox.delete(0, tk.END)
         self._reply_list_index = []
-        for profile_name, threads in self.reply_state.items():
-            for thread_id, info in threads.items():
-                if info.get('status') != 'replied':
+        # list() กัน worker เพิ่มแชทเข้ามาระหว่างวน (dict เปลี่ยนขนาดกลางลูป = พัง)
+        for profile_name, threads in list(self.reply_state.items()):
+            for thread_id, info in list(threads.items()):
+                if info.get('status') == 'old':
+                    continue  # แชทเก่าที่จดไว้เฉยๆ ไม่ได้ตอบ ไม่ต้องโชว์ให้รก
+                if info.get('status') == 'failed':
+                    status_txt = "⚠ ส่งไม่สำเร็จ"
+                elif info.get('status') != 'replied':
                     status_txt = "⚠ จับคู่ไม่ได้"
                 else:
                     sent = [self.STAGE_LABELS[c] for c in self.ALL_STAGES[:int(info.get('stage', 1))]]
@@ -3056,7 +3114,7 @@ class FacebookMarketplaceRenewer:
                 if index < len(self.selected_profiles):
                     time.sleep(random.uniform(4, 12))
             except Exception as e:
-                self.update_status(f"{profile_name}: เปิดไม่สำเร็จ - {str(e)[:80]}", "red")
+                self.notify_problem(profile_name, f"เปิดไม่สำเร็จ ไม่ได้เฝ้าแชทเฟสนี้ - {str(e)[:80]}")
                 continue
 
         for t in threads:
@@ -3067,59 +3125,37 @@ class FacebookMarketplaceRenewer:
     def auto_reply_worker(self, profile_name, driver, product_folders):
         """monitor inbox ของ Profile นี้ วนหาแชทใหม่แล้วตอบอัตโนมัติ จนกว่า auto_reply_active จะเป็น False"""
         self.reply_state.setdefault(profile_name, {})
+        lock = self.driver_locks.setdefault(profile_name, threading.Lock())
         last_renew = 0.0  # 0 = ต่ออายุให้รอบแรกเลย ลูกค้าจะได้เห็นว่ามันทำงานจริง
+        first_pass = True  # รอบแรกเจอแต่แชทที่ค้างอยู่ก่อนเปิดโปรแกรม
+        logged_out = False
 
         while self.auto_reply_active:
             try:
                 driver.current_url
             except Exception:
-                self.update_status(f"{profile_name}: Chrome ถูกปิดไปแล้ว", "red")
+                self.notify_problem(profile_name, "Chrome ถูกปิดไปแล้ว เลิกเฝ้าแชทเฟสนี้")
                 break
 
-            try:
-                driver.get("https://www.facebook.com/marketplace/inbox/")
-                self.wait_for_page_load(driver)
-                time.sleep(random.uniform(2, 4))
+            # ถือ Chrome ไว้ทั้งรอบ ปุ่มส่งด้วยมือต้องรอ ไม่งั้นมันพาไปห้องแชทอื่นกลางคัน
+            with lock:
+                try:
+                    scanned = self.scan_inbox_once(profile_name, driver, product_folders, first_pass)
+                    if scanned:
+                        first_pass = False
+                    # หลุด Login แล้วแถวแชทเป็น 0 ดูเหมือนไม่มีลูกค้าทัก เงียบไปทั้งเฟส — แจ้งตอนเพิ่งหลุดครั้งเดียว ไม่ยิงทุกนาที
+                    elif not logged_out:
+                        self.notify_problem(profile_name, "หลุด Login อ่านแชทไม่ได้ ต้อง Login เฟสนี้ใหม่")
+                    logged_out = not scanned
+                except Exception as e:
+                    self.update_status(f"{profile_name}: Error สแกนแชท - {str(e)[:80]}", "orange")
 
-                # อ่านทุกแถวให้ครบก่อนเปิดแชทแรก — พอ driver.get() แล้ว element ที่เหลือกลายเป็น stale
-                pending = []
-                seen_this_pass = set()
-                for row in self.find_all(driver, 'conversation_row'):
-                    try:
-                        href = row.get_attribute('href')
-                        row_text = row.text
-                    except Exception:
-                        continue
-                    row_key = self.inbox_row_key(row_text)
-                    preview = self.preview_message(row_text)
-                    if not href or '/t/' not in href:
-                        continue
-
-                    thread_id = href.split('/t/')[-1].split('/')[0].split('?')[0]
-                    if not thread_id or thread_id in seen_this_pass:
-                        continue
-                    seen_this_pass.add(thread_id)
-                    pending.append((thread_id, href, row_key, preview))
-
-                for thread_id, href, row_key, preview in pending:
-                    if not self.auto_reply_active:
-                        break
-                    info = self.reply_state[profile_name].get(thread_id)
-                    if info is None:
-                        self.handle_one_conversation(profile_name, driver, href, thread_id, product_folders, row_key)
-                    elif not self.handle_followup(profile_name, driver, thread_id, product_folders, info, row_key, preview):
-                        continue  # ไม่มีอะไรใหม่ ไม่ได้เปิดหน้าไหน ไม่ต้องหน่วงเวลา
-                    self.random_sleep(3, 8)
-
-            except Exception as e:
-                self.update_status(f"{profile_name}: Error สแกนแชท - {str(e)[:80]}", "orange")
-
-            # ถึงรอบต่ออายุสินค้าหรือยัง — ใช้ Chrome ตัวเดิม เปิดโปรไฟล์เดียวซ้อนกันไม่ได้
-            if self.auto_reply_active and self.renew_due(last_renew):
-                self.renew_pass_during_reply(profile_name, driver)
-                # นับเวลาจากตอนต่อเสร็จ ไม่ใช่ตอนเริ่ม ไม่งั้นรอบที่ต่อนานกว่า 30 นาที
-                # จะวนไปต่ออายุต่อทันทีโดยไม่ได้อ่านแชทคั่นเลย
-                last_renew = time.time()
+                # ถึงรอบต่ออายุสินค้าหรือยัง — ใช้ Chrome ตัวเดิม เปิดโปรไฟล์เดียวซ้อนกันไม่ได้
+                if self.auto_reply_active and not logged_out and self.renew_due(last_renew):
+                    self.renew_pass_during_reply(profile_name, driver)
+                    # นับเวลาจากตอนต่อเสร็จ ไม่ใช่ตอนเริ่ม ไม่งั้นรอบที่ต่อนานกว่า 30 นาที
+                    # จะวนไปต่ออายุต่อทันทีโดยไม่ได้อ่านแชทคั่นเลย
+                    last_renew = time.time()
 
             # พักก่อน scan รอบถัดไป — เช็คแฟล็กหยุดทุกวินาทีเพื่อให้กดหยุดแล้วตอบสนองไว
             for _ in range(int(random.uniform(40, 80))):
@@ -3132,6 +3168,46 @@ class FacebookMarketplaceRenewer:
         except Exception:
             pass
         self.update_status(f"{profile_name}: ปิด Chrome แล้ว (หยุดตอบแชท)", "gray")
+
+    def scan_inbox_once(self, profile_name, driver, product_folders, first_pass):
+        """อ่าน inbox 1 รอบ ตอบ/แจ้งเตือนแชทที่มีอะไรใหม่ — คืน False ถ้าเฟสนี้หลุด Login (ไม่ได้อ่านแชท)"""
+        driver.get("https://www.facebook.com/marketplace/inbox/")
+        self.wait_for_page_load(driver)
+        time.sleep(random.uniform(2, 4))
+        if self._is_login_pending_url(driver.current_url):
+            return False
+
+        # อ่านทุกแถวให้ครบก่อนเปิดแชทแรก — พอ driver.get() แล้ว element ที่เหลือกลายเป็น stale
+        pending = []
+        seen_this_pass = set()
+        for row in self.find_all(driver, 'conversation_row'):
+            try:
+                href = row.get_attribute('href')
+                row_text = row.text
+            except Exception:
+                continue
+            row_key = self.inbox_row_key(row_text)
+            preview = self.preview_message(row_text)
+            if not href or '/t/' not in href:
+                continue
+
+            thread_id = href.split('/t/')[-1].split('/')[0].split('?')[0]
+            if not thread_id or thread_id in seen_this_pass:
+                continue
+            seen_this_pass.add(thread_id)
+            pending.append((thread_id, href, row_key, preview))
+
+        for thread_id, href, row_key, preview in pending:
+            if not self.auto_reply_active:
+                break
+            info = self.reply_state[profile_name].get(thread_id)
+            if info is None:
+                self.handle_one_conversation(profile_name, driver, href, thread_id, product_folders,
+                                             row_key, preview, is_new=not first_pass)
+            elif not self.handle_followup(profile_name, driver, thread_id, product_folders, info, row_key, preview):
+                continue  # ไม่มีอะไรใหม่ ไม่ได้เปิดหน้าไหน ไม่ต้องหน่วงเวลา
+            self.random_sleep(3, 8)
+        return True
 
     def renew_pass_during_reply(self, profile_name, driver):
         """คั่นรอบเฝ้าแชทไปต่ออายุสินค้า แล้วกลับมาอ่านแชทต่อด้วย Chrome ตัวเดิม"""
@@ -3156,8 +3232,10 @@ class FacebookMarketplaceRenewer:
         except Exception as e:
             self.update_status(f"{profile_name}: ต่ออายุระหว่างเฝ้าแชทไม่สำเร็จ - {str(e)[:60]}", "orange")
 
-    def handle_one_conversation(self, profile_name, driver, href, thread_id, product_folders, row_key=None):
-        """เปิดแชทเดี่ยว ตรวจว่าเป็นข้อความแรกจากลูกค้าหรือไม่ จับคู่สินค้า แล้วส่งข้อมูล"""
+    def handle_one_conversation(self, profile_name, driver, href, thread_id, product_folders, row_key=None,
+                                preview="", is_new=True):
+        """เปิดแชทเดี่ยว ตรวจว่าเป็นข้อความแรกจากลูกค้าหรือไม่ จับคู่สินค้า แล้วส่งข้อมูล
+        is_new=False คือแชทที่ค้างอยู่ก่อนเปิดโปรแกรม (เจอในรอบสแกนแรก)"""
         try:
             driver.get(href)
             self.wait_for_page_load(driver)
@@ -3166,50 +3244,77 @@ class FacebookMarketplaceRenewer:
             # หมายเหตุ: incoming_bubble นับแถวข้อความทั้งห้อง (ยังแยกฝั่งลูกค้า/เราไม่ได้ในตอนนี้)
             # ใช้เป็นตัวกรองหยาบๆ ว่ายังไม่มีบทสนทนายาว ต้องปรับให้แม่นตอน live-test
             incoming = self.find_all(driver, 'incoming_bubble')
-            if len(incoming) > 1:
-                return  # มีข้อความมากกว่า 1 แถวแล้ว ข้าม (กันไปตอบทับบทสนทนาที่คุยต่อแล้ว)
 
             listing_el = self.find_first(driver, 'listing_title', wait=5)
             listing_name = listing_el.text.strip() if listing_el else ""
 
             matched_name = self.match_listing_to_folder(listing_name, product_folders)
+            now = time.strftime('%Y-%m-%d %H:%M')
+
+            if len(incoming) > 1:
+                # มีข้อความมากกว่า 1 แถวแล้ว ไม่ตอบทับบทสนทนาที่คุยต่อแล้ว แต่ต้องจดไว้ —
+                # ไม่จด รอบหน้าไม่รู้จักแชทนี้ เปิดซ้ำทุกรอบ (ขึ้นอ่านแล้วทุกนาที) และลูกค้าพิมพ์มาอีกก็ไม่มีแจ้งเตือน
+                self.reply_state[profile_name][thread_id] = {
+                    'product': matched_name or listing_name or '(ไม่พบชื่อสินค้า)',
+                    'status': 'old',
+                    'replied_at': now,
+                    'row_key': row_key,
+                }
+                self.save_reply_settings()
+                # โผล่มาหลังเปิดโปรแกรม = ลูกค้าเพิ่งพิมพ์มา ต้องบอกเจ้าของ
+                # ที่ค้างอยู่ก่อนเปิดโปรแกรมไม่แจ้ง ไม่งั้นเปิดโปรแกรมทีนึงเด้งรัวเท่าจำนวนแชทเก่า
+                if is_new:
+                    self.notify_new_chat(profile_name, matched_name or listing_name, 'old_chat', message=preview)
+                return
 
             if not matched_name:
                 self.reply_state[profile_name][thread_id] = {
                     'product': listing_name or '(ไม่พบชื่อสินค้า)',
                     'status': 'unmatched',
-                    'replied_at': time.strftime('%Y-%m-%d %H:%M'),
+                    'replied_at': now,
                     'row_key': row_key,
                 }
                 self.save_reply_settings()
                 self.root.after(0, self.update_reply_list)
                 self.update_status(f"{profile_name}: จับคู่สินค้าไม่ได้ - '{listing_name}' (ข้ามไว้ให้ส่งเอง)", "orange")
-                self.notify_new_chat(profile_name, listing_name, 'unmatched', listing_name)
+                self.notify_new_chat(profile_name, listing_name, 'unmatched', listing_name, message=preview)
                 return
 
             folder_info = product_folders[matched_name]
             sent_main = self.stage_enabled.get('main', True)
-            if sent_main:
-                self.send_folder_content(driver, folder_info['main'])
+            if sent_main and not self.send_folder_content(driver, folder_info['main']):
+                # ส่งไม่ออก ห้ามจดว่าตอบแล้ว และห้ามลองเองซ้ำทุกรอบ (รูปอาจไปแล้วครึ่งนึง ส่งซ้ำ = ลูกค้าได้รูปซ้ำ)
+                self.reply_state[profile_name][thread_id] = {
+                    'product': matched_name,
+                    'status': 'failed',
+                    'replied_at': now,
+                    'row_key': None,
+                }
+                self.save_reply_settings()
+                self.root.after(0, self.update_reply_list)
+                self.update_status(f"{profile_name}: ส่งข้อมูล '{matched_name}' ไม่สำเร็จ ต้องตอบเอง", "red")
+                self.notify_new_chat(profile_name, matched_name, 'send_failed', message=preview)
+                return
 
             self.reply_state[profile_name][thread_id] = {
                 'product': matched_name,
                 'status': 'replied',
-                'replied_at': time.strftime('%Y-%m-%d %H:%M'),
+                'replied_at': now,
                 'stage': 1,
                 # ส่งไปแล้ว preview ของแถวเปลี่ยนเพราะข้อความของเราเอง — ตั้ง None ให้รอบหน้าเก็บ
                 # คีย์ใหม่เป็นฐานเทียบ ไม่งั้นจะนับว่าลูกค้าทักกลับแล้วยิงรีวิวทันที
                 # ไม่ได้ส่งอะไร preview ยังเป็นของลูกค้า เก็บคีย์ไว้เลยได้
                 'row_key': None if sent_main else row_key,
+                'just_sent': sent_main,
             }
             self.save_reply_settings()
             self.root.after(0, self.update_reply_list)
             if sent_main:
                 self.update_status(f"{profile_name}: ตอบแชท '{matched_name}' แล้ว", "green")
-                self.notify_new_chat(profile_name, matched_name, 'replied')
+                self.notify_new_chat(profile_name, matched_name, 'replied', message=preview)
             else:
                 self.update_status(f"{profile_name}: '{matched_name}' ปิดตอบแชทหลักไว้ (ไม่ได้ส่ง)", "orange")
-                self.notify_new_chat(profile_name, matched_name, 'main_off')
+                self.notify_new_chat(profile_name, matched_name, 'main_off', message=preview)
 
         except Exception as e:
             self.update_status(f"{profile_name}: ตอบแชทไม่สำเร็จ - {str(e)[:80]}", "red")
@@ -3223,18 +3328,27 @@ class FacebookMarketplaceRenewer:
             return False
 
         if reason == 'unmatched':
-            # จับคู่สินค้าไม่ได้ ไม่เคยส่งอะไรให้ แต่ลูกค้าพิมพ์มาอีกต้องรู้
+            # แชทที่โปรแกรมไม่ได้ตอบให้ (จับคู่ไม่ได้ / แชทเก่า / ส่งไม่ออก) แต่ลูกค้าพิมพ์มาอีกต้องรู้
             changed = info.get('row_key') is not None and info.get('row_key') != row_key
             info['row_key'] = row_key
             if changed:
                 self.save_reply_settings()
                 self.update_status(f"{profile_name}: '{info.get('product', '?')}' ทักมาอีก (ยังต้องตอบเอง)", "orange")
-                self.notify_new_chat(profile_name, info.get('product', ''), 'unmatched_again', message=preview)
+                again = {'old': 'old_chat', 'failed': 'send_failed'}.get(info.get('status'), 'unmatched_again')
+                self.notify_new_chat(profile_name, info.get('product', ''), again, message=preview)
             return False
 
         if reason == 'baseline':
             info['row_key'] = row_key  # เก็บฐานเทียบไว้ก่อน ยังไม่ส่งอะไร
+            # เราเพิ่งส่งไป แต่ข้อความล่าสุดในแถวเป็นของลูกค้า = เขาตอบกลับมาก่อนรอบสแกนนี้
+            # ไม่แจ้งตรงนี้ ข้อความนั้นจะกลายเป็นฐานเทียบ แล้วหายเงียบไปเลย (แจ้งอย่างเดียว ไม่ส่งโฟลเดอร์ถัดไป
+            # เพราะถ้าอ่าน preview พลาด ได้แค่แจ้งเตือนเกินมา 1 อัน ไม่ใช่ยิงรีวิวใส่ลูกค้าที่ไม่ได้พิมพ์อะไร)
+            answered = info.pop('just_sent', False) and bool(preview)
             self.save_reply_settings()
+            if answered:
+                self.update_status(f"{profile_name}: '{info.get('product', '?')}' ตอบกลับมาแล้ว (ต้องตอบเอง)", "orange")
+                self.notify_new_chat(profile_name, info.get('product', ''), 'quick_reply', message=preview)
+                return False
             # พิมพ์คีย์ให้เห็นด้วย ใช้ยืนยันตอน live-test ว่าอ่าน preview ของแถวได้จริง
             self.update_status(
                 f"{profile_name}: เฝ้าแชท '{info.get('product', '?')}' (คีย์ {row_key[:24] or 'ว่าง!'})", "gray")
@@ -3251,6 +3365,7 @@ class FacebookMarketplaceRenewer:
         if folder_info is None:
             # โฟลเดอร์สินค้าถูกย้าย/เปลี่ยนชื่อไปแล้ว — ห้ามนับว่าส่งครบ ไม่งั้นแชทนี้ตายไปเลย
             info['row_key'] = row_key
+            self.save_reply_settings()
             self.update_status(f"{profile_name}: ไม่เจอโฟลเดอร์ '{info.get('product', '?')}' แล้ว ต้องตอบเอง", "orange")
             self.notify_new_chat(profile_name, info.get('product', ''), 'folder_missing', message=preview)
             return False
@@ -3273,17 +3388,26 @@ class FacebookMarketplaceRenewer:
             driver.get(f"https://www.facebook.com/marketplace/t/{thread_id}/")
             self.wait_for_page_load(driver)
             time.sleep(random.uniform(2, 4))
-            self.send_folder_content(driver, folder_info[category])
+            sent_ok = self.send_folder_content(driver, folder_info[category])
         except Exception as e:
             self.update_status(f"{profile_name}: ส่ง {category} อัตโนมัติไม่สำเร็จ - {str(e)[:80]}", "red")
             return True
 
+        label = self.STAGE_LABELS.get(category, category)
+        if not sent_ok:
+            # ไม่ขยับ stage ลูกค้าพิมพ์มาอีกรอบหน้าจะลองส่งโฟลเดอร์นี้ใหม่ — ห้ามแจ้งว่าส่งแล้ว
+            info['row_key'] = None
+            self.save_reply_settings()
+            self.update_status(f"{profile_name}: ส่ง{label}ให้ '{info.get('product', '?')}' ไม่สำเร็จ ต้องตอบเอง", "red")
+            self.notify_new_chat(profile_name, info.get('product', ''), 'send_failed', message=preview)
+            return True
+
         info['stage'] = new_stage
         info['row_key'] = None  # ส่งแล้ว preview เปลี่ยนเพราะเราเอง รอบหน้าเก็บฐานใหม่
+        info['just_sent'] = True
         info['replied_at'] = time.strftime('%Y-%m-%d %H:%M')
         self.save_reply_settings()
         self.root.after(0, self.update_reply_list)
-        label = self.STAGE_LABELS.get(category, category)
         self.update_status(f"{profile_name}: ส่ง{label}ให้ '{info.get('product', '?')}' อัตโนมัติแล้ว", "green")
         self.notify_new_chat(profile_name, info.get('product', ''), 'followup', category, message=preview)
         return True
@@ -3319,15 +3443,24 @@ class FacebookMarketplaceRenewer:
 
         def worker():
             try:
-                thread_href = f"https://www.facebook.com/marketplace/t/{thread_id}/"
-                driver.get(thread_href)
-                self.wait_for_page_load(driver)
-                time.sleep(random.uniform(2, 4))
-                self.send_folder_content(driver, assets)
+                lock = self.driver_locks.setdefault(profile_name, threading.Lock())
+                if lock.locked():
+                    self.update_status(f"{profile_name}: รอ Chrome จบรอบที่ทำอยู่ก่อน แล้วจะส่งให้", "blue")
+                # Chrome ตัวนี้ลูปเฝ้าแชทใช้อยู่ด้วย สั่งซ้อนกัน = มันพาไปห้องอื่นกลางคัน ของไปลงผิดลูกค้า
+                with lock:
+                    thread_href = f"https://www.facebook.com/marketplace/t/{thread_id}/"
+                    driver.get(thread_href)
+                    self.wait_for_page_load(driver)
+                    time.sleep(random.uniform(2, 4))
+                    sent_ok = self.send_folder_content(driver, assets)
+                if not sent_ok:
+                    self.update_status(f"{profile_name}: ส่ง {category} ให้ '{info['product']}' ไม่สำเร็จ", "red")
+                    return
                 # ขยับ stage ด้วย ไม่งั้นระบบออโต้ส่งโฟลเดอร์เดิมซ้ำตอนลูกค้าทักกลับมา
                 if category in self.REPLY_STAGES:
                     info['stage'] = max(int(info.get('stage', 1)), self.REPLY_STAGES.index(category) + 2)
                     info['row_key'] = None
+                    info['just_sent'] = True
                     self.save_reply_settings()
                 self.update_status(f"{profile_name}: ส่ง {category} ให้ '{info['product']}' แล้ว", "green")
             except Exception as e:
