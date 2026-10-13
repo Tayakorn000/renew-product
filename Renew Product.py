@@ -824,7 +824,7 @@ class FacebookMarketplaceRenewer:
         try:
             self.manual_login_and_save_cookies(profile_name)
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("ผิดพลาด", f"Login ด้วยมือไม่สำเร็จ: {str(e)}"))
+            self.root.after(0, lambda e=e: messagebox.showerror("ผิดพลาด", f"Login ด้วยมือไม่สำเร็จ: {str(e)}"))
 
     def manual_login_and_save_cookies(self, profile_name):
         """เปิด Chrome ด้วย Profile ที่เลือก ให้ผู้ใช้ Login เองในหน้าต่างจริง แล้วบันทึก Cookie"""
@@ -959,7 +959,7 @@ class FacebookMarketplaceRenewer:
         try:
             self.auto_cookie_login_profiles(profile_names)
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("ผิดพลาด", f"Cookie Login ไม่สำเร็จ: {str(e)}"))
+            self.root.after(0, lambda e=e: messagebox.showerror("ผิดพลาด", f"Cookie Login ไม่สำเร็จ: {str(e)}"))
         finally:
             self.root.after(0, lambda: self.auto_cookie_login_btn.config(
                 state=tk.NORMAL, bg="#FF9800",
@@ -1085,7 +1085,7 @@ class FacebookMarketplaceRenewer:
         try:
             self.renew_multiple_profiles()
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("ข้อผิดพลาด", f"เกิดข้อผิดพลาด: {str(e)}"))
+            self.root.after(0, lambda e=e: messagebox.showerror("ข้อผิดพลาด", f"เกิดข้อผิดพลาด: {str(e)}"))
             self.root.after(0, lambda: self.update_status("เกิดข้อผิดพลาด", "red"))
         finally:
             self.is_running = False
@@ -2826,7 +2826,7 @@ class FacebookMarketplaceRenewer:
         try:
             self.auto_reply_multiple_profiles()
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("ข้อผิดพลาด", f"เกิดข้อผิดพลาด: {str(e)}"))
+            self.root.after(0, lambda e=e: messagebox.showerror("ข้อผิดพลาด", f"เกิดข้อผิดพลาด: {str(e)}"))
         finally:
             self.is_running = False
             self.auto_reply_active = False
