@@ -160,3 +160,13 @@ TELEGRAM_CHAT_ID = "7017153301"
 ## Login
 
 เพิ่ม Profile ด้วยไฟล์ `.ini` (section `[FBAccount]`, มี `UserID`/`Password` หรือ `Cookies` ก็ได้) — ถ้าไฟล์มี Cookie อยู่แล้วโปรแกรมจะ login อัตโนมัติ ไม่ต้องกด Login ด้วยมือ
+
+### ไฟล์ `.ini` ใช้ร่วมกับ FBMKP (โปรแกรมลงสินค้า)
+
+ลูกค้าใช้ไฟล์ `.ini` ชุดเดียวกับ FBMKP สองโปรแกรมเลยอยู่บน session Facebook เดียวกัน โปรแกรมนี้ทำอะไรกับไฟล์หรือกับ session กระทบ FBMKP ด้วย กติกา 3 ข้อ (v3 แก้ทั้ง 3 ข้อ มีเทสคุม):
+
+- เขียน Cookie ลง `.ini` ต้องเป็นฟอร์แมตของ Playwright (วันหมดอายุชื่อ `expires`) Selenium ให้มาเป็น `expiry` ถ้าเขียนลงไปทั้งอย่างนั้น FBMKP จะได้ Cookie แบบไม่มีวันหมดอายุ ปิด Chrome แล้ว Login ในโปรไฟล์ของ FBMKP หาย ไฟล์ที่เวอร์ชันเก่าเขียนไว้ โปรแกรมแก้ชื่อ key ให้เองตอนเปิด
+- เขียนทับ Cookie ใน `.ini` เฉพาะตอน Cookie เดิมใช้ไม่ได้แล้ว Login ใหม่สำเร็จ หรือตอนกด Login ด้วยมือ ห้ามเขียนทับตอน Chrome ล็อคอินค้างอยู่แล้ว
+- ไม่ปลอม fingerprint ของ Chrome (การ์ดจอ ขนาดจอ canvas) ใช้ค่าจริงของเครื่อง ให้ตรงกับ Chrome ที่ FBMKP เปิด ของเดิมสุ่มใหม่ทุกครั้งที่เปิด Facebook เลยเห็นเฟสเดียวโผล่จากเครื่องที่หน้าตาไม่ซ้ำกัน
+
+ซอร์ส FBMKP อยู่นอก repo นี้ (`~/Documents/Facebook B/fbm_gui_stable_fingerprint.py`)

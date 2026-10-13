@@ -575,6 +575,124 @@ def test_logged_out_cookies_never_overwrite_the_ini():
     assert "OLDGOOD" not in saved and "UserID = a" in saved and app._read_cookies_from_ini(path)
 
 
+# หน้าตาเดียวกับ driver.get_cookies() ของ Selenium: วันหมดอายุชื่อ expiry (Playwright ของ FBMKP ใช้ expires)
+SELENIUM_COOKIES = [
+    {"name": "c_user", "value": "1", "domain": ".facebook.com", "path": "/", "secure": True,
+     "httpOnly": False, "sameSite": "None", "expiry": 1900000000},
+    {"name": "xs", "value": "2", "domain": ".facebook.com", "path": "/", "secure": True,
+     "httpOnly": True, "sameSite": "None", "expiry": 1900000001},
+    {"name": "presence", "value": "3", "domain": ".facebook.com", "path": "/", "secure": True, "httpOnly": False},
+]
+
+
+def ini_cookies(path):
+    return app._parse_cookies_to_list(app._read_cookies_from_ini(path))
+
+
+def test_cookies_are_saved_the_way_fbmkp_reads_them():
+    folder = tempfile.mkdtemp()
+    path = os.path.join(folder, "ID7.ini")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("[FBAccount]\nCookies = OLD\nUserID = a\nPassword = b;%c\n")
+
+    # FBMKP ส่ง dict พวกนี้เข้า Playwright ตรงๆ key expiry โดนทิ้ง Cookie กลายเป็นแบบปิด Chrome แล้วหาย
+    app._save_cookies_to_ini(FakeDriver(SELENIUM_COOKIES), path, force=True)
+    saved = ini_cookies(path)
+    assert [c.get("expires") for c in saved] == [1900000000, 1900000001, None]
+    assert not any("expiry" in c for c in saved) and [c["value"] for c in saved] == ["1", "2", "3"]
+    text = open(path, encoding="utf-8").read()
+    assert "UserID = a\n" in text and "Password = b;%c\n" in text and os.listdir(folder) == ["ID7.ini"]
+
+
+def test_ini_files_written_by_older_versions_are_fixed_on_startup():
+    import base64, json
+    folder = tempfile.mkdtemp()
+    old, good = os.path.join(folder, "old.ini"), os.path.join(folder, "good.ini")
+    b64 = lambda cookies: base64.b64encode(json.dumps(cookies).encode()).decode()
+    with open(old, "w", encoding="utf-8") as f:
+        f.write("[FBAccount]\nCookies = %s\nUserID = a\nPassword = b\n" % b64(SELENIUM_COOKIES))
+    with open(good, "w", encoding="utf-8") as f:
+        f.write("[FBAccount]\nUserID = a\nCookies = %s\n" % b64([{"name": "c_user", "value": "1", "expires": 5}]))
+    untouched = open(good, "rb").read()
+
+    a = App.__new__(App)
+    a.profiles = {"old": {"config_file": old}, "good": {"config_file": good},
+                  "gone": {"config_file": os.path.join(folder, "nope.ini")}, "broken": {}}
+    a.fix_ini_cookie_format()
+
+    fixed = ini_cookies(old)
+    assert [c.get("expires") for c in fixed] == [1900000000, 1900000001, None] and not any("expiry" in c for c in fixed)
+    assert [c["value"] for c in fixed] == ["1", "2", "3"]  # แก้แค่ชื่อ key ค่า Cookie ต้องเท่าเดิม
+    assert "UserID = a\nPassword = b\n" in open(old, encoding="utf-8").read()
+    assert open(good, "rb").read() == untouched and sorted(os.listdir(folder)) == ["good.ini", "old.ini"]
+
+
+class StopAtSave(BaseException):
+    """หยุด open_and_login_profile ตรงจุดบันทึก Cookie (ต้องทะลุ except Exception ของมันออกมา)"""
+
+
+def login_app(driver):
+    """open_and_login_profile กับ Chrome ปลอม รันถึงจุดบันทึก Cookie แล้วหยุด คืนค่า force ที่มันจะใช้"""
+    import types
+    a = reply_app()
+    folder = tempfile.mkdtemp()
+    ini = os.path.join(folder, "ID7.ini")
+    with open(ini, "w", encoding="utf-8") as f:
+        f.write("[FBAccount]\nCookies = c_user=1; xs=2\n")
+    a.profiles = {"ID7": {"config_file": ini, "chrome_profile": folder}}
+    a._get_chrome_version = lambda: 141
+    a._clean_mismatched_chromedriver = lambda v: None
+    a.human_like_read_page = lambda d: None
+    renew_product.uc = types.SimpleNamespace(
+        ChromeOptions=lambda: types.SimpleNamespace(add_argument=lambda arg: None),
+        Chrome=lambda **kw: driver)
+
+    class NoEmailField:  # หน้าที่ล็อคอินอยู่แล้วไม่มีช่อง email ให้เจอ
+        def __init__(self, *a):
+            pass
+
+        def until(self, condition):
+            raise TimeoutError
+
+    renew_product.WebDriverWait = NoEmailField
+    renew_product.By = types.SimpleNamespace(NAME="name")
+    renew_product.EC = types.SimpleNamespace(presence_of_element_located=lambda locator: None)
+    driver.set_window_position = lambda x, y: None
+    a.saved = []
+
+    def save(drv, path, force=False):
+        a.saved.append(force)
+        raise StopAtSave
+
+    a._save_cookies_to_ini = save
+    return a
+
+
+def test_ini_is_left_alone_when_chrome_is_already_logged_in():
+    # Chrome ของโปรไฟล์ล็อคอินค้างอยู่แล้ว = ไม่ได้ลอง Cookie ในไฟล์เลย ห้ามสรุปว่า Cookie หมดอายุแล้วเขียนทับ
+    # ไฟล์นี้ FBMKP ใช้ร่วม เคยโดนทับทุกรอบที่กดเริ่ม
+    drv = FakeDriver()
+    a = login_app(drv)
+    try:
+        a.open_and_login_profile("ID7")
+    except StopAtSave:
+        pass
+    assert a.saved == [False]
+    assert drv.cdp == []  # ไม่ยัดสคริปต์ปลอม fingerprint เข้า Chrome แล้ว ใช้ค่าจริงของเครื่องเหมือน FBMKP
+
+    class LoggedOut(FakeDriver):
+        def get(self, url):
+            super().get("https://www.facebook.com/login/")
+
+    a = login_app(LoggedOut())
+    a._try_cookie_login = lambda d, raw: True  # Cookie ในไฟล์ยังใช้ได้ ก็ไม่ต้องเขียนทับเหมือนกัน
+    try:
+        a.open_and_login_profile("ID7")
+    except StopAtSave:
+        pass
+    assert a.saved == [False]
+
+
 def test_typing_emoji_does_not_break_the_message():
     reply_app()
     el, drv = FakeEl(), FakeDriver()
@@ -637,6 +755,9 @@ if __name__ == "__main__":
     test_worker_reports_a_profile_that_stopped_watching()
     test_manual_send_waits_its_turn_and_reports_failure()
     test_logged_out_cookies_never_overwrite_the_ini()
+    test_cookies_are_saved_the_way_fbmkp_reads_them()
+    test_ini_files_written_by_older_versions_are_fixed_on_startup()
+    test_ini_is_left_alone_when_chrome_is_already_logged_in()
     test_typing_emoji_does_not_break_the_message()
     test_reply_settings_file_is_replaced_whole()
     test_new_notify_statuses_have_their_own_wording()

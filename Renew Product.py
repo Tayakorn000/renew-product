@@ -35,7 +35,7 @@ except Exception:
 
 # เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
 # ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
-APP_VERSION = 2
+APP_VERSION = 3
 UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
 UPDATE_FILE = "renew_update.py"
 
@@ -107,6 +107,7 @@ class FacebookMarketplaceRenewer:
 
         # โหลดการตั้งค่าที่บันทึกไว้
         self.load_settings()
+        self.fix_ini_cookie_format()
         self.load_reply_settings()
         self.setup_gui()
         # รอ mainloop ขึ้นก่อน thread ถึงเรียก root.after ได้
@@ -300,245 +301,6 @@ class FacebookMarketplaceRenewer:
             # Focus กลับมา
             driver.execute_script("window.dispatchEvent(new Event('focus'));")
             time.sleep(random.uniform(0.5, 1.0))
-        except:
-            pass
-    
-    def add_human_behavior_scripts(self, driver):
-        """เพิ่ม JavaScript เพื่อปลอม fingerprint และพฤติกรรม"""
-        # สุ่ม noise สำหรับ canvas — ทั้งบวกและลบเพื่อไม่ให้เป็น pattern
-        canvas_noise_r = random.randint(-5, 5)
-        canvas_noise_g = random.randint(-5, 5)
-        canvas_noise_b = random.randint(-5, 5)
-
-        # สุ่ม WebGL vendor/renderer จากรายการที่เป็นไปได้จริง
-        webgl_vendors = ['Intel Inc.', 'NVIDIA Corporation', 'AMD', 'Google Inc. (Intel)']
-        webgl_renderers = [
-            'Intel Iris OpenGL Engine',
-            'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0)',
-            'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0)',
-            'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0)',
-        ]
-        webgl_vendor = random.choice(webgl_vendors)
-        webgl_renderer = random.choice(webgl_renderers)
-
-        try:
-            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-                'source': f'''
-                    // ซ่อน webdriver - Chrome จริง (ไม่ใช่ automation) คืนค่า false ไม่ใช่ undefined
-                    Object.defineProperty(navigator, 'webdriver', {{get: () => false}});
-                    
-                    // ปลอม plugins
-                    Object.defineProperty(navigator, 'plugins', {{
-                        get: () => [
-                            {{name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'}},
-                            {{name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''}},
-                            {{name: 'Native Client', filename: 'internal-nacl-plugin', description: ''}}
-                        ]
-                    }});
-                    
-                    // ปลอม languages
-                    Object.defineProperty(navigator, 'languages', {{get: () => ['th-TH', 'th', 'en-US', 'en']}});
-                    
-                    // เพิ่ม chrome object
-                    window.chrome = {{
-                        runtime: {{}},
-                        loadTimes: function() {{}},
-                        csi: function() {{}},
-                        app: {{}}
-                    }};
-                    
-                    // ปลอม permissions
-                    const originalQuery = window.navigator.permissions.query;
-                    window.navigator.permissions.query = (parameters) => (
-                        parameters.name === 'notifications' ?
-                            Promise.resolve({{state: Notification.permission}}) :
-                            originalQuery(parameters)
-                    );
-                    
-                    // ปลอม canvas fingerprint — เพิ่ม noise สุ่มทั้งบวกและลบเพื่อไม่ให้เป็น pattern
-                    // ทำงานบน canvas สำเนา (ไม่แก้ canvas จริง) และ noise คงที่ต่อ session
-                    // เพื่อให้เรียก toDataURL ซ้ำบน canvas เดิมได้ hash เดิมเสมอ (เหมือนเบราว์เซอร์จริง)
-                    const _canvasNoise = [{canvas_noise_r}, {canvas_noise_g}, {canvas_noise_b}];
-                    const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-                    HTMLCanvasElement.prototype.toDataURL = function(type) {{
-                        try {{
-                            const ctx = this.getContext('2d');
-                            if (ctx && this.width > 0 && this.height > 0) {{
-                                const imageData = ctx.getImageData(0, 0, this.width, this.height);
-                                for (let i = 0; i < imageData.data.length; i += 4) {{
-                                    imageData.data[i]     = Math.max(0, Math.min(255, imageData.data[i]     + _canvasNoise[0]));
-                                    imageData.data[i + 1] = Math.max(0, Math.min(255, imageData.data[i + 1] + _canvasNoise[1]));
-                                    imageData.data[i + 2] = Math.max(0, Math.min(255, imageData.data[i + 2] + _canvasNoise[2]));
-                                }}
-                                const clone = document.createElement('canvas');
-                                clone.width = this.width;
-                                clone.height = this.height;
-                                clone.getContext('2d').putImageData(imageData, 0, 0);
-                                return originalToDataURL.apply(clone, arguments);
-                            }}
-                        }} catch(e) {{}}
-                        return originalToDataURL.apply(this, arguments);
-                    }};
-                    
-                    // ปลอม WebGL — สุ่ม vendor/renderer ต่างกันทุก session
-                    const _wglVendor = '{webgl_vendor}';
-                    const _wglRenderer = '{webgl_renderer}';
-                    const getParameter = WebGLRenderingContext.prototype.getParameter;
-                    WebGLRenderingContext.prototype.getParameter = function(parameter) {{
-                        if (parameter === 37445) {{ return _wglVendor; }}
-                        if (parameter === 37446) {{ return _wglRenderer; }}
-                        return getParameter.apply(this, arguments);
-                    }};
-                    const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
-                    WebGL2RenderingContext.prototype.getParameter = function(parameter) {{
-                        if (parameter === 37445) {{ return _wglVendor; }}
-                        if (parameter === 37446) {{ return _wglRenderer; }}
-                        return getParameter2.apply(this, arguments);
-                    }};
-                '''
-            })
-        except:
-            pass
-    
-    def _get_real_hardware_info(self):
-        """ดึงข้อมูล hardware จริงจากเครื่อง เพื่อให้ค่าสอดคล้องกับเครื่องจริง"""
-        import subprocess
-        
-        # ดึง CPU cores จริง
-        try:
-            import os
-            real_cores = os.cpu_count() or 4
-        except:
-            real_cores = 4
-        
-        # ดึง RAM จริง (แปลงเป็น GB แบบ deviceMemory — ปัดเป็น 1, 2, 4, 8, 16, 32)
-        try:
-            import psutil
-            ram_bytes = psutil.virtual_memory().total
-            ram_gb = ram_bytes / (1024 ** 3)
-            # deviceMemory API ปัดลง power of 2
-            for val in [32, 16, 8, 4, 2, 1]:
-                if ram_gb >= val:
-                    real_mem = val
-                    break
-            else:
-                real_mem = 4
-        except:
-            real_mem = 8
-        
-        # ดึง Timezone จริง
-        try:
-            import datetime
-            offset_sec = -time.timezone if time.daylight == 0 else -time.altzone
-            real_tz_offset = offset_sec // 60  # นาที
-        except:
-            real_tz_offset = 420  # Asia/Bangkok default (UTC+7)
-        
-        return real_cores, real_mem, real_tz_offset
-
-    def add_advanced_stealth_scripts(self, driver):
-        """เพิ่ม scripts ซ่อนตัวขั้นสูง - แก้ headless detection และอื่นๆ"""
-        # ใช้ screen config เดียวกับที่ตั้ง window size (ต้อง sync กัน)
-        if hasattr(self, '_chosen_screen'):
-            sw, sh, sah = self._chosen_screen
-        else:
-            # fallback ถ้าไม่มี
-            screen_configs = [
-                (1920, 1080, 1040), (1920, 1200, 1160),
-                (1680, 1050, 1010), (1440, 900, 860), (1366, 768, 728),
-            ]
-            sw, sh, sah = random.choice(screen_configs)
-
-        # ปลอม window.screenX/Y ให้เป็นค่าสุ่มที่คนจริงจะมี (กันตรวจจับด้วยพิกัดคงที่ซ้ำทุก session)
-        win_w, win_h = getattr(self, '_chosen_window_size', (sw, sah))
-        fake_screen_x = random.randint(0, max(0, sw - win_w))
-        fake_screen_y = random.randint(0, max(0, sah - win_h))
-
-        # ดึงค่า hardware จริงจากเครื่อง เพื่อให้สอดคล้องกับเครื่องจริง
-        real_cores, real_mem, real_tz_offset = self._get_real_hardware_info()
-        
-        # hardware concurrency: ใช้ค่าจริง ±0 (ไม่สุ่ม เพราะต้องตรงกับเครื่อง)
-        hw_cores = real_cores
-        # device memory: ใช้ค่าจริง
-        hw_mem = real_mem
-        rtt_val  = random.randint(20, 80)
-        dl_val   = round(random.uniform(5, 20), 1)
-
-        try:
-            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-                'source': f'''
-                    // แก้ headless detection
-                    Object.defineProperty(navigator, 'maxTouchPoints', {{get: () => 0}});
-                    Object.defineProperty(navigator, 'platform', {{get: () => 'Win32'}});
-                    Object.defineProperty(navigator, 'vendor', {{get: () => 'Google Inc.'}});
-                    
-                    // ปลอม battery API
-                    Object.defineProperty(navigator, 'getBattery', {{
-                        get: () => async () => ({{
-                            charging: true,
-                            chargingTime: 0,
-                            dischargingTime: Infinity,
-                            level: 1
-                        }})
-                    }});
-                    
-                    // ปลอม connection — สุ่ม rtt/downlink ต่างกันทุก session
-                    Object.defineProperty(navigator, 'connection', {{
-                        get: () => ({{
-                            effectiveType: '4g',
-                            rtt: {rtt_val},
-                            downlink: {dl_val},
-                            saveData: false
-                        }})
-                    }});
-                    
-                    // ปลอม screen properties — สุ่ม resolution ต่างกันทุก session
-                    Object.defineProperty(screen, 'availWidth',  {{get: () => {sw}}});
-                    Object.defineProperty(screen, 'availHeight', {{get: () => {sah}}});
-                    Object.defineProperty(screen, 'width',       {{get: () => {sw}}});
-                    Object.defineProperty(screen, 'height',      {{get: () => {sh}}});
-                    Object.defineProperty(screen, 'colorDepth',  {{get: () => 24}});
-                    Object.defineProperty(screen, 'pixelDepth',  {{get: () => 24}});
-
-                    // ปลอมตำแหน่งหน้าต่างให้สุ่มต่างกันทุก session
-                    Object.defineProperty(window, 'screenX',    {{get: () => {fake_screen_x}}});
-                    Object.defineProperty(window, 'screenY',    {{get: () => {fake_screen_y}}});
-                    Object.defineProperty(window, 'screenLeft', {{get: () => {fake_screen_x}}});
-                    Object.defineProperty(window, 'screenTop',  {{get: () => {fake_screen_y}}});
-
-                    // ปลอม hardwareConcurrency — ใช้ค่าจริงจากเครื่อง
-                    Object.defineProperty(navigator, 'hardwareConcurrency', {{get: () => {hw_cores}}});
-                    
-                    // ปลอม deviceMemory — ใช้ค่าจริงจากเครื่อง
-                    Object.defineProperty(navigator, 'deviceMemory', {{get: () => {hw_mem}}});
-                    
-                    // ปลอม timezone offset ให้ตรงกับเครื่องจริง
-                    const _realTzOffset = {real_tz_offset};
-                    const _origDateGetTimezoneOffset = Date.prototype.getTimezoneOffset;
-                    Date.prototype.getTimezoneOffset = function() {{
-                        return -_realTzOffset;
-                    }};
-                    
-                    // ซ่อน automation indicators
-                    delete navigator.__proto__.webdriver;
-                    
-                    // ปลอม chrome runtime
-                    if (!window.chrome) {{ window.chrome = {{}}; }}
-                    if (!window.chrome.runtime) {{ window.chrome.runtime = {{}}; }}
-                    
-                    // ปลอม media devices
-                    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {{
-                        const originalEnumerateDevices = navigator.mediaDevices.enumerateDevices;
-                        navigator.mediaDevices.enumerateDevices = async function() {{
-                            const devices = await originalEnumerateDevices.call(this);
-                            return devices.length > 0 ? devices : [
-                                {{deviceId: 'default', kind: 'audioinput', label: '', groupId: ''}},
-                                {{deviceId: 'default', kind: 'videoinput', label: '', groupId: ''}}
-                            ];
-                        }};
-                    }}
-                '''
-            })
         except:
             pass
     
@@ -1238,13 +1000,6 @@ class FacebookMarketplaceRenewer:
 
                 driver = uc.Chrome(options=chrome_options, use_subprocess=True, version_main=chrome_version)
 
-                # inject fingerprint
-                try:
-                    self.add_human_behavior_scripts(driver)
-                    self.add_advanced_stealth_scripts(driver)
-                except Exception:
-                    pass
-
                 # ให้หน้าต่างแสดงบนจอ (ต่างจากโหมด Renew ที่ซ่อนออกนอกจอ)
                 driver.set_window_position(100, 100)
 
@@ -1934,7 +1689,15 @@ class FacebookMarketplaceRenewer:
         if not any(c.get('name') == 'c_user' for c in all_cookies):
             raise Exception("ยัง Login ไม่สำเร็จ ไม่บันทึก Cookie")
 
-        cookies_json_str = json.dumps(all_cookies, ensure_ascii=False)
+        self._write_cookies_to_ini(ini_path, all_cookies)
+
+    def _write_cookies_to_ini(self, ini_path, cookies):
+        """เขียน Cookies ลง .ini ในฟอร์แมตของ FBMKP (Playwright) เพราะ FBMKP อ่านไฟล์เดียวกันนี้
+        Selenium เรียกวันหมดอายุว่า expiry แต่ Playwright รู้จักแค่ expires ถ้าเขียน expiry ลงไป
+        FBMKP จะได้ Cookie แบบไม่มีวันหมดอายุ ปิด Chrome ทีไร Login ในโปรไฟล์ของ FBMKP หายทุกที"""
+        cookies = [{('expires' if k == 'expiry' else k): v for k, v in c.items()}
+                   for c in cookies if isinstance(c, dict)]
+        cookies_json_str = json.dumps(cookies, ensure_ascii=False)
         cookies_b64 = base64.b64encode(cookies_json_str.encode('utf-8')).decode('ascii')
 
         with open(ini_path, 'r', encoding='utf-8') as f:
@@ -1951,8 +1714,23 @@ class FacebookMarketplaceRenewer:
         else:
             ini_content += f'\n[FBAccount]\nCookies = {cookies_b64}\n'
 
-        with open(ini_path, 'w', encoding='utf-8') as f:
+        # ไฟล์นี้มีรหัสผ่านของลูกค้าอยู่ด้วย เขียนไฟล์ข้างๆ แล้วสลับ ดับกลางทางไฟล์เดิมยังอยู่ครบ
+        tmp_path = ini_path + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as f:
             f.write(ini_content)
+        os.replace(tmp_path, ini_path)
+
+    def fix_ini_cookie_format(self):
+        """ไฟล์ .ini ที่เวอร์ชันก่อน v3 เขียนไว้ใช้ key expiry (ดู _write_cookies_to_ini)
+        เปิดโปรแกรมมาแก้เป็น expires ให้ครั้งเดียว ค่า Cookie ไม่ถูกแตะ"""
+        for profile in self.profiles.values():
+            try:
+                ini_path = profile.get('config_file', '')
+                cookies = self._parse_cookies_to_list(self._read_cookies_from_ini(ini_path))
+                if cookies and any(isinstance(c, dict) and 'expiry' in c for c in cookies):
+                    self._write_cookies_to_ini(ini_path, cookies)
+            except Exception:
+                pass
 
     def open_and_login_profile(self, profile_name, target_url="https://www.facebook.com/marketplace/selling/renew_listings/"):
         """เปิด Chrome และล็อคอินจนถึงหน้าที่ระบุ (ค่าเริ่มต้น: หน้า Renew)"""
@@ -1997,32 +1775,11 @@ class FacebookMarketplaceRenewer:
             chrome_options.add_argument(f"--user-data-dir={chrome_profile_dir}")
             chrome_options.add_argument("--profile-directory=Default")
             
-            # สุ่ม screen config ที่จะใช้ทั้ง window size และ stealth script ให้ตรงกัน
-            # (screen_width, screen_height, available_height)
-            self._screen_configs_pool = [
-                (1920, 1080, 1040),
-                (1920, 1200, 1160),
-                (1680, 1050, 1010),
-                (1440, 900, 860),
-                (1366, 768, 728),
-            ]
-            self._chosen_screen = random.choice(self._screen_configs_pool)
-            chosen_sw, chosen_sh, chosen_sah = self._chosen_screen
-            
-            # Window size ต้องเล็กกว่าหรือเท่ากับ screen resolution (คนจริงไม่ได้ maximize เสมอ)
-            # สุ่มให้เล็กกว่า screen เล็กน้อย หรือเท่ากับ screen (maximize)
-            if random.random() < 0.4:
-                # 40% maximize เต็มจอ
-                win_w = chosen_sw
-                win_h = chosen_sah  # ใช้ available height (หัก taskbar)
-            else:
-                # 60% ไม่เต็มจอ — ลดขนาดลงเล็กน้อย
-                win_w = chosen_sw - random.randint(0, 200)
-                win_h = chosen_sah - random.randint(0, 150)
-            
-            chrome_options.add_argument(f"--window-size={win_w},{win_h}")
-            self._chosen_window_size = (win_w, win_h)
-            
+            # ไม่ปลอม fingerprint และไม่สุ่มขนาดจอ ใช้ค่าจริงของเครื่อง ให้ตรงกับ Chrome ที่ FBMKP เปิด
+            # สองโปรแกรมใช้ session Facebook เดียวกันจากไฟล์ .ini ถ้าที่นี่สุ่มการ์ดจอ/ขนาดจอใหม่ทุกรอบ
+            # Facebook จะเห็นเฟสเดียวโผล่จากเครื่องที่หน้าตาเปลี่ยนไปเรื่อยๆ (FBMKP ถอดของพวกนี้ไปแล้วตั้งแต่ ส.ค.)
+            # ขนาดหน้าต่างไม่ต้องตั้ง undetected_chromedriver ใส่ --window-size กับ --start-maximized ทับเองอยู่แล้ว
+
             # หมายเหตุ: ไม่ใส่ --disable-infobars, --disable-popup-blocking, --no-sandbox,
             # --disable-gpu, --disable-dev-shm-usage เพราะเป็น flags ที่ bot ใช้บ่อย
             # คนปกติเปิด Chrome ไม่มี flags พิเศษเหล่านี้
@@ -2065,14 +1822,6 @@ class FacebookMarketplaceRenewer:
             
             driver.set_window_position(100, 100)
 
-            # inject fingerprint scripts ทันทีหลังเปิด Chrome
-            # ต้อง inject ก่อนเปิดหน้าเว็บใดๆ เพื่อให้มีผลตั้งแต่หน้าแรก
-            try:
-                self.add_human_behavior_scripts(driver)
-                self.add_advanced_stealth_scripts(driver)
-            except:
-                pass
-            
             # รอหลังเปิด Chrome ก่อนเข้า Facebook — สุ่มให้ไม่เป็น pattern
             wait_after_open = random.uniform(14, 25)
             self.update_status(f"{profile_name}: รอ {int(wait_after_open)} วินาทีหลังเปิด Chrome...", "blue")
@@ -2119,14 +1868,14 @@ class FacebookMarketplaceRenewer:
                 self.update_status(f"{profile_name}: ไม่แน่ใจ กำลังลองล็อคอิน...", "orange")
 
             # ถ้ายังไม่ได้ล็อคอิน ลอง Login ด้วย Cookie ก่อน (เหมือน FBMKP)
-            cookie_login_ok = False
+            cookie_expired = False
             if not is_logged_in and cookies_raw:
                 self.update_status(f"{profile_name}: กำลังลอง Login ด้วย Cookie...", "blue")
-                cookie_login_ok = self._try_cookie_login(driver, cookies_raw)
-                if cookie_login_ok:
+                if self._try_cookie_login(driver, cookies_raw):
                     is_logged_in = True
                     self.update_status(f"{profile_name}: Login ด้วย Cookie สำเร็จ", "green")
                 else:
+                    cookie_expired = True
                     self.update_status(f"{profile_name}: Cookie หมดอายุหรือไม่ถูกต้อง", "orange")
 
             # ถ้ายังไม่ได้ล็อคอิน ให้ทำการล็อคอินด้วย User/Password
@@ -2309,8 +2058,10 @@ class FacebookMarketplaceRenewer:
                     time.sleep(3)
 
             # บันทึก Cookie ใหม่ไว้ใช้ครั้งต่อไป - เขียนทับเฉพาะตอน Cookie เดิมพิสูจน์แล้วว่าหมดอายุ
+            # เคยเขียนทับทุกรอบที่ Chrome ล็อคอินค้างอยู่แล้วด้วย (ไม่ได้ลอง Cookie = นับว่าไม่ผ่าน)
+            # ไฟล์นี้ FBMKP ใช้ร่วม โดนทับทุกรอบคือ FBMKP ถูกลากมาใช้ session ของโปรแกรมนี้
             try:
-                self._save_cookies_to_ini(driver, config_file_path, force=bool(cookies_raw) and not cookie_login_ok)
+                self._save_cookies_to_ini(driver, config_file_path, force=cookie_expired)
             except Exception:
                 pass
 
