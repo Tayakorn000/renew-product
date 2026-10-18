@@ -3272,6 +3272,11 @@ def run_update():
 
 
 if __name__ == "__main__":
+    # เปิด .py ด้วย Python ในเครื่อง (เช่น VS Code) ที่ไม่มี selenium = uc เป็น None
+    # กด Login แล้วขึ้น 'NoneType' object has no attribute 'ChromeOptions' ลูกค้าอ่านไม่รู้เรื่อง บอกตั้งแต่เปิด
+    if uc is None:
+        messagebox.showerror("เปิดผิดไฟล์", "ไฟล์ .py เปิดตรงๆ ไม่ได้ ให้เปิดที่ Renew Product.exe")
+        sys.exit(1)
     # exe เท่านั้นที่อัปเดตตัวเอง รันจาก .py ตรงๆ (ตอนแก้โค้ด) ต้องได้โค้ดในเครื่อง
     if globals().get('UPDATED') or not getattr(sys, 'frozen', False) or not run_update():
         app = FacebookMarketplaceRenewer()
