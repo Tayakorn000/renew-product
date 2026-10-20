@@ -693,6 +693,94 @@ def test_ini_is_left_alone_when_chrome_is_already_logged_in():
     assert a.saved == [False]
 
 
+class LoginWindow(FakeDriver):
+    """Chrome ที่ผู้ใช้กำลัง Login เอง: โปรแกรมเช็คแต่ละรอบได้ (url, cookies, มีช่องรหัสไหม) ทีละขั้น หมดขั้น = ผู้ใช้ปิด Chrome"""
+    def __init__(self, steps):
+        self.steps, self.now = list(steps), None
+        super().__init__()
+
+    @property
+    def current_url(self):
+        if not self.steps:
+            self.now = None
+            raise RuntimeError("chrome not reachable")
+        self.now = self.steps.pop(0)
+        return self.now[0]
+
+    @current_url.setter
+    def current_url(self, value):
+        pass
+
+    def get_cookies(self):
+        if self.now is None:
+            raise RuntimeError("chrome not reachable")
+        return self.now[1]
+
+    def find_elements(self, by, value):
+        return [FakeEl()] if self.now[2] else []
+
+
+USER = [{"name": "c_user", "value": "NEW"}, {"name": "xs", "value": "NEWXS"}]
+LOGIN_FORM = ("https://www.facebook.com/login/", [], True)
+
+
+def manual_login(steps):
+    """กด Login ด้วยมือ กับ Chrome ปลอม คืน (error หรือ None, ค่า c_user ที่อยู่ในไฟล์ .ini ตอนจบ)"""
+    a = login_app(LoginWindow(steps))
+    ini = a.profiles["ID7"]["config_file"]
+    try:
+        a.manual_login_and_save_cookies("ID7")
+        err = None
+    except Exception as e:
+        err = str(e)
+    return err, [c["value"] for c in ini_cookies(ini) if c["name"] == "c_user"]
+
+
+def test_manual_login_saves_even_when_the_url_says_login():
+    # หลัง Login Facebook พาไปหน้าจำอุปกรณ์ URL มีคำว่า login เคยรอจนผู้ใช้ปิด Chrome แล้วขึ้นว่าไม่สำเร็จ
+    err, saved = manual_login([LOGIN_FORM] + [("https://www.facebook.com/login/save-device/", USER, False)] * 3)
+    assert err is None and saved == ["NEW"]
+
+
+def test_manual_login_saves_when_chrome_is_closed_right_after():
+    err, saved = manual_login([LOGIN_FORM, ("https://www.facebook.com/", USER, False)])
+    assert err is None and saved == ["NEW"]
+
+
+def test_manual_login_never_saves_a_checkpoint_session():
+    # ติดหน้ายืนยันตัวตนอยู่ c_user มีแล้วแต่ใช้ไม่ได้ ปิด Chrome กลางทาง ห้ามทับ .ini ที่ FBMKP ใช้ร่วม
+    err, saved = manual_login([LOGIN_FORM, ("https://www.facebook.com/checkpoint/1501092823525282/", USER, False)])
+    assert "ยังไม่ได้ Login" in err and saved == ["1"]
+
+
+def test_manual_login_ignores_an_old_cookie_on_the_login_form():
+    # โปรไฟล์ Chrome มี c_user เก่าค้าง แต่หน้ายังให้กรอกรหัส = ยังไม่ได้ Login ห้ามบันทึกทับ
+    stale = ("https://www.facebook.com/login/", [{"name": "c_user", "value": "OLD"}], True)
+    err, saved = manual_login([stale, stale])
+    assert "ยังไม่ได้ Login" in err and saved == ["1"]
+
+
+def test_cookie_button_falls_back_to_the_password_in_the_ini():
+    drv = FakeDriver()
+    a = login_app(drv)
+    del a._save_cookies_to_ini  # ใช้ตัวจริง
+    ini = a.profiles["ID7"]["config_file"]
+    with open(ini, "a", encoding="utf-8") as f:
+        f.write("UserID = a\nPassword = b%c\n")
+    a._try_cookie_login = lambda d, raw: False
+    typed = []
+
+    def password_login(d, profile, user_id, password):
+        typed.append((user_id, password))
+        d.cookies = USER
+
+    a._password_login = password_login
+    a.auto_cookie_login_profiles(["ID7"])
+    assert typed == [("a", "b%c")]  # รหัสมี % ต้องอ่านได้ (configparser ปกติพัง)
+    assert [c["value"] for c in ini_cookies(ini) if c["name"] == "c_user"] == ["NEW"]
+    assert not drv.closed and a.statuses[-1].startswith("Cookie Login เสร็จ: สำเร็จ 1/1")
+
+
 def test_typing_emoji_does_not_break_the_message():
     reply_app()
     el, drv = FakeEl(), FakeDriver()
@@ -758,6 +846,11 @@ if __name__ == "__main__":
     test_cookies_are_saved_the_way_fbmkp_reads_them()
     test_ini_files_written_by_older_versions_are_fixed_on_startup()
     test_ini_is_left_alone_when_chrome_is_already_logged_in()
+    test_manual_login_saves_even_when_the_url_says_login()
+    test_manual_login_saves_when_chrome_is_closed_right_after()
+    test_manual_login_never_saves_a_checkpoint_session()
+    test_manual_login_ignores_an_old_cookie_on_the_login_form()
+    test_cookie_button_falls_back_to_the_password_in_the_ini()
     test_typing_emoji_does_not_break_the_message()
     test_reply_settings_file_is_replaced_whole()
     test_new_notify_statuses_have_their_own_wording()

@@ -35,7 +35,7 @@ except Exception:
 
 # เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
 # ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
-APP_VERSION = 3
+APP_VERSION = 4
 UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
 UPDATE_FILE = "renew_update.py"
 
@@ -851,49 +851,73 @@ class FacebookMarketplaceRenewer:
             driver.get("https://www.facebook.com/login")
             time.sleep(random.uniform(3, 6))
 
-            self.root.after(0, lambda: messagebox.showinfo(
-                "Login ด้วยตัวเอง",
+            # กด OK = ผู้ใช้บอกว่า Login เสร็จแล้ว ให้บันทึกเลย (เคยเป็นแค่กล่องข้อความ กดแล้วไม่มีอะไรเกิดขึ้น)
+            ok_pressed = threading.Event()
+
+            def ask_done(text):
+                messagebox.showinfo("Login ด้วยตัวเอง", text)
+                ok_pressed.set()
+
+            self.root.after(0, lambda: ask_done(
                 f"กรุณา Login Facebook ในหน้าต่าง Chrome ที่เปิดขึ้น ({profile_name})\n\n"
-                "เสร็จแล้วกด OK ที่นี่เพื่อบันทึก Cookie"
+                "เข้าหน้า Facebook ได้แล้วกด OK เพื่อบันทึก Cookie"
             ))
 
-            # รอจนกว่าจะ Login เสร็จจริง สูงสุด 10 นาที
-            # ต้องผ่านหน้ายืนยันตัวตนให้หมดก่อน (checkpoint / ยืนยัน 2 ชั้น) ไม่งั้นได้ Cookie ครึ่งๆ กลางๆ
+            # รอ Login สูงสุด 10 นาที ดูจาก Cookie c_user + หน้าไม่มีช่องรหัสผ่าน ไม่ดูคำว่า login ใน URL
+            # เคยดู URL: หน้าหลัง Login บางหน้ามีคำว่า login (เช่นหน้าจำอุปกรณ์) โปรแกรมเลยรอจนผู้ใช้ปิด Chrome
+            # แล้วขึ้นว่า Login ไม่สำเร็จ ทั้งที่เข้าได้แล้ว
             max_wait = 600
             waited = 0
             stable = 0
-            login_done = False
+            cookies = None  # Cookie ชุดล่าสุดตอนที่ Login อยู่ ปิด Chrome ไปแล้วก็ยังบันทึกชุดนี้ได้
             while waited < max_wait:
                 time.sleep(2)
                 waited += 2
                 try:
                     current_url = driver.current_url.lower()
+                    now = driver.get_cookies()
+                    on_login_form = bool(driver.find_elements(By.NAME, "pass"))
                 except Exception:
-                    break
+                    break  # ปิด Chrome แล้ว
 
-                if "facebook.com" not in current_url:
+                # หน้ายืนยันตัวตน (checkpoint / ยืนยัน 2 ชั้น) มี c_user แล้วแต่ยังใช้ไม่ได้ ห้ามเก็บ
+                # ไม่งั้นกด OK หรือปิด Chrome กลางทาง = ทับ .ini ด้วย session ที่เปิดมาก็ติด checkpoint (FBMKP ใช้ไฟล์เดียวกัน)
+                verifying = any(k in current_url for k in (
+                    'checkpoint', 'two_step_verification', 'auth_platform', 'afad', 'confirmemail', 'recover'))
+                logged_in = any(c.get('name') == 'c_user' for c in now) and not on_login_form and not verifying
+                if logged_in:
+                    cookies = now
+
+                if ok_pressed.is_set():
+                    if cookies:
+                        break
+                    ok_pressed.clear()
+                    self.root.after(0, lambda: ask_done(
+                        f"{profile_name} ยังไม่ได้ Login หรือยังยืนยันตัวตนไม่เสร็จ\n\n"
+                        "ทำในหน้าต่าง Chrome ให้เสร็จก่อน แล้วกด OK อีกครั้ง"))
+
+                # ต้องนิ่งติดกัน 3 รอบ (6 วินาที) ถึงนับว่าเสร็จจริง
+                if logged_in:
+                    stable += 1
+                    if stable >= 3:
+                        break
+                else:
                     stable = 0
-                    continue
+                    self.update_status(f"{profile_name}: รอ Login / ยืนยันตัวตนใน Chrome...", "orange")
 
-                if self._is_login_pending_url(current_url):
-                    if stable:
-                        stable = 0
-                    self.update_status(f"{profile_name}: รอยืนยันตัวตนใน Chrome...", "orange")
-                    continue
+            if not cookies:
+                raise Exception("ยังไม่ได้ Login (หมดเวลา 10 นาที หรือปิด Chrome ก่อน Login / ยืนยันตัวตนเสร็จ)")
 
-                # อยู่หน้าปกติแล้ว ต้องนิ่งติดกัน 3 รอบ (6 วินาที) ถึงนับว่าเสร็จจริง
-                stable += 1
-                if stable >= 3:
-                    login_done = True
-                    break
+            # เผื่อเวลาให้ Facebook ตั้ง Cookie ชุดสุดท้ายให้ครบก่อนบันทึก (ถ้า Chrome ยังเปิดอยู่)
+            try:
+                time.sleep(random.uniform(3, 5))
+                now = driver.get_cookies()
+                if any(c.get('name') == 'c_user' for c in now):
+                    cookies = now
+            except Exception:
+                pass
 
-            if not login_done:
-                raise Exception("หมดเวลารอ Login (10 นาที) หรือ Browser ถูกปิดก่อน Login เสร็จ")
-
-            # เผื่อเวลาให้ Facebook ตั้ง Cookie ชุดสุดท้ายให้ครบก่อนบันทึก
-            time.sleep(random.uniform(3, 5))
-
-            self._save_cookies_to_ini(driver, config_file_path, force=True)
+            self._write_cookies_to_ini(config_file_path, cookies)
             self.update_status(f"{profile_name}: บันทึก Cookie สำเร็จ", "green")
             self.root.after(0, lambda: messagebox.showinfo("สำเร็จ", f"บันทึก Cookie ของ {profile_name} แล้ว\nครั้งต่อไปไม่ต้อง Login ซ้ำ"))
         finally:
@@ -919,14 +943,14 @@ class FacebookMarketplaceRenewer:
             if not ini_path or not os.path.exists(ini_path):
                 profiles_no_cookie.append(f"{pn} (ไม่พบไฟล์ .ini)")
                 continue
-            cookies_raw = self._read_cookies_from_ini(ini_path)
-            if not cookies_raw:
-                profiles_no_cookie.append(f"{pn} (ไม่มี Cookie ในไฟล์ .ini)")
+            # ไม่มี Cookie แต่มี UserID/Password ก็ Login ด้วยรหัสได้
+            if not self._read_cookies_from_ini(ini_path) and not all(self._read_credentials(ini_path)):
+                profiles_no_cookie.append(f"{pn} (ไฟล์ .ini ไม่มีทั้ง Cookie และ UserID/Password)")
 
         if profiles_no_cookie:
             messagebox.showwarning(
-                "บาง Profile ไม่มี Cookie",
-                "Profile ต่อไปนี้ไม่มี Cookie — ข้ามไป:\n\n" +
+                "บาง Profile ไม่มีข้อมูล Login",
+                "Profile ต่อไปนี้ Login ไม่ได้ ข้ามไป:\n\n" +
                 "\n".join(profiles_no_cookie) +
                 "\n\nใช้ปุ่ม 'Login ด้วยมือ (บันทึก Cookie)' เพื่อบันทึก Cookie ก่อน"
             )
@@ -942,7 +966,7 @@ class FacebookMarketplaceRenewer:
             "ยืนยัน",
             f"จะเปิด Chrome และ Login ด้วย Cookie อัตโนมัติสำหรับ {len(profile_names)} Profile:\n\n" +
             "\n".join(profile_names) +
-            "\n\nดำเนินการต่อ?"
+            "\n\nCookie ใช้ไม่ได้ จะ Login ด้วย UserID/Password ในไฟล์ .ini ให้แทน\n\nดำเนินการต่อ?"
         )
         if not confirm:
             return
@@ -983,8 +1007,6 @@ class FacebookMarketplaceRenewer:
                     raise Exception(f"ไม่พบไฟล์ .ini: {config_file_path}")
 
                 cookies_raw = self._read_cookies_from_ini(config_file_path)
-                if not cookies_raw:
-                    raise Exception("ไม่พบ Cookie ในไฟล์ .ini")
 
                 if not os.path.exists(chrome_profile_dir):
                     os.makedirs(chrome_profile_dir)
@@ -1004,17 +1026,25 @@ class FacebookMarketplaceRenewer:
                 driver.set_window_position(100, 100)
 
                 # inject cookies และตรวจ Login — ใช้หน้า Facebook หลัก ไม่ใช่หน้า renew
-                login_ok = self._try_cookie_login(driver, cookies_raw)
+                # Cookie ผ่าน = ไม่เขียนทับ Cookie เดิม ถ้า inject ไม่ครบ จะทับของดีด้วยของที่ขาด
+                # (.ini ของลูกค้าเป็นต้นฉบับชุดเดียว) เขียนทับเฉพาะตอน login ใหม่สำเร็จเท่านั้น
+                if not self._try_cookie_login(driver, cookies_raw):
+                    # Cookie ใช้ไม่ได้ ลอง UserID/Password ใน .ini ต่อเหมือน FBMKP แล้วเก็บ Cookie ชุดใหม่ทับของเสีย
+                    user_id, password = self._read_credentials(config_file_path)
+                    if not (user_id and password):
+                        raise Exception("Cookie หมดอายุ และไฟล์ .ini ไม่มี UserID/Password กรุณา Login ด้วยมือแล้วบันทึก Cookie ใหม่")
+                    self.update_status(f"[{idx}/{total}] {profile_name}: Cookie ใช้ไม่ได้ กำลัง Login ด้วยรหัส...", "orange")
+                    # ไม่มี Cookie ในไฟล์ = ยังไม่ได้เข้าหน้า Facebook เลย
+                    if "facebook.com" not in driver.current_url:
+                        driver.get("https://www.facebook.com/")
+                        time.sleep(random.uniform(4, 7))
+                    self._password_login(driver, profile_name, user_id, password)
+                    self._save_cookies_to_ini(driver, config_file_path, force=True)
 
-                if login_ok:
-                    # ไม่เขียนทับ Cookie เดิม — ถ้า inject ไม่ครบ จะทับของดีด้วยของที่ขาด
-                    # (.ini ของลูกค้าเป็นต้นฉบับชุดเดียว) เขียนทับเฉพาะตอน login ใหม่สำเร็จเท่านั้น
-                    self.update_status(f"[{idx}/{total}] {profile_name}: Cookie Login สำเร็จ", "green")
-                    results.append((profile_name, True, None))
-                    # ไม่ปิด driver — ให้หน้าต่าง Chrome ค้างอยู่ที่หน้า Facebook หลัก
-                    driver = None
-                else:
-                    raise Exception("Cookie หมดอายุหรือไม่ถูกต้อง — กรุณา Login ด้วยมือแล้วบันทึก Cookie ใหม่")
+                self.update_status(f"[{idx}/{total}] {profile_name}: Login สำเร็จ", "green")
+                results.append((profile_name, True, None))
+                # ไม่ปิด driver — ให้หน้าต่าง Chrome ค้างอยู่ที่หน้า Facebook หลัก
+                driver = None
 
             except Exception as e:
                 self.update_status(f"[{idx}/{total}] {profile_name}: {str(e)[:80]}", "red")
@@ -1674,6 +1704,206 @@ class FacebookMarketplaceRenewer:
 
         return True
 
+    def _read_credentials(self, ini_path):
+        """UserID, Password จาก section [FBAccount] (ไม่มี = ค่าว่าง)
+        ปิด interpolation เหมือน FBMKP ไม่งั้นรหัสที่มี % อ่านไม่ขึ้น"""
+        config = configparser.ConfigParser(interpolation=None)
+        config.read(ini_path, encoding='utf-8')
+        return (config.get('FBAccount', 'UserID', fallback='').strip(),
+                config.get('FBAccount', 'Password', fallback='').strip())
+
+    def _password_login(self, driver, profile_name, user_id, password):
+        """กรอก UserID/Password จาก .ini ในหน้า Login ของ Facebook แล้วรอผ่านหน้ายืนยันตัวตน"""
+        self.update_status(f"{profile_name}: กำลังล็อคอิน...", "blue")
+
+        # รอให้ช่อง email ปรากฏ (ใช้ name="email" แทน ID)
+        def find_email_field():
+            return WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.NAME, "email"))
+            )
+
+        try:
+            email_field = find_email_field()
+        except Exception:
+            # Cookie ตายที่เพิ่งลองใส่ยังค้าง Facebook อาจโชว์หน้าอื่นแทนช่องอีเมล ล้าง session เก่าแล้วโหลดใหม่เหมือน FBMKP
+            # ลบแค่ c_user / xs เก็บ Cookie อื่นไว้ Facebook จะได้ยังจำเครื่องนี้ได้
+            # ยังไม่เจอ = error ของ Selenium ไม่มีข้อความ ผู้ใช้เห็นแค่ชื่อ Profile ว่างๆ ต้องบอกเอง
+            try:
+                for name in ('c_user', 'xs'):
+                    driver.delete_cookie(name)
+                driver.get("https://www.facebook.com/")
+                time.sleep(random.uniform(4, 7))
+                email_field = find_email_field()
+            except Exception:
+                raise Exception("ไม่เจอช่องกรอกอีเมลของ Facebook (อาจติดหน้ายืนยันตัวตน) ใช้ปุ่ม Login ด้วยมือแทน")
+
+        # เลื่อนหน้าจอไปที่ช่อง email แบบมนุษย์
+        self.human_like_scroll_to_element(driver, email_field)
+        time.sleep(random.uniform(0.6, 1.2))
+
+        # เคลื่อนเมาส์ไปมาก่อนคลิก (เหมือนกำลังมองหา)
+        if random.random() < 0.5:
+            self.random_mouse_movement(driver)
+
+        email_field.click()
+        time.sleep(random.uniform(0.5, 1.0))
+        self.human_like_clear_field(email_field, driver)
+        time.sleep(random.uniform(0.3, 0.7))
+
+        # พิมพ์แบบมนุษย์
+        self.human_like_type(email_field, user_id, driver)
+
+        time.sleep(random.uniform(0.8, 1.8))
+
+        # กรอก Password (ช่องล่าง)
+        password_field = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.NAME, "pass"))
+        )
+
+        # เลื่อนหน้าจอไปที่ช่อง password แบบมนุษย์
+        self.human_like_scroll_to_element(driver, password_field)
+        time.sleep(random.uniform(0.5, 1.0))
+
+        password_field.click()
+        time.sleep(random.uniform(0.5, 1.0))
+        self.human_like_clear_field(password_field, driver)
+        time.sleep(random.uniform(0.3, 0.7))
+
+        # พิมพ์แบบมนุษย์
+        self.human_like_type(password_field, password, driver)
+
+        time.sleep(random.uniform(1.0, 2.0))
+
+        # กดปุ่มล็อคอิน - ลองหลายวิธี
+        self.update_status(f"{profile_name}: กำลังกดปุ่มล็อคอิน...", "blue")
+
+        # เคลื่อนเมาส์สุ่มก่อนกดปุ่ม
+        if random.random() < 0.3:
+            self.random_mouse_movement(driver)
+            time.sleep(random.uniform(0.3, 0.7))
+
+        login_clicked = False
+
+        # วิธีที่ 1: ใช้ XPath หาจากข้อความ "Log in" หรือ "เข้าสู่ระบบ"
+        try:
+            login_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//span[text()='Log in' or text()='เข้าสู่ระบบ']"))
+            )
+            login_button.click()
+            login_clicked = True
+            self.update_status(f"{profile_name}: กดปุ่มล็อคอินสำเร็จ (วิธีที่ 1)", "green")
+        except Exception as e1:
+            self.update_status(f"{profile_name}: ลองวิธีที่ 2...", "blue")
+
+            # วิธีที่ 2: หาปุ่มจาก type="submit"
+            try:
+                login_button = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, "//button[@type='submit' and @name='login']"))
+                )
+                login_button.click()
+                login_clicked = True
+                self.update_status(f"{profile_name}: กดปุ่มล็อคอินสำเร็จ (วิธีที่ 2)", "green")
+            except Exception as e2:
+                self.update_status(f"{profile_name}: ลองวิธีที่ 3...", "blue")
+
+                # วิธีที่ 3: หาปุ่มจาก data-testid
+                try:
+                    login_button = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, "//button[@data-testid='royal_login_button']"))
+                    )
+                    login_button.click()
+                    login_clicked = True
+                    self.update_status(f"{profile_name}: กดปุ่มล็อคอินสำเร็จ (วิธีที่ 3)", "green")
+                except Exception as e3:
+                    self.update_status(f"{profile_name}: ลองวิธีที่ 4...", "blue")
+
+                    # วิธีที่ 4: กด Enter ที่ช่อง password
+                    try:
+                        from selenium.webdriver.common.keys import Keys
+                        password_field.send_keys(Keys.RETURN)
+                        login_clicked = True
+                        self.update_status(f"{profile_name}: กดปุ่มล็อคอินสำเร็จ (วิธีที่ 4)", "green")
+                    except Exception as e4:
+                        raise Exception(f"ไม่สามารถกดปุ่มล็อคอินได้ทุกวิธี: {str(e1)}, {str(e2)}, {str(e3)}, {str(e4)}")
+
+        if not login_clicked:
+            raise Exception("ไม่สามารถกดปุ่มล็อคอินได้")
+
+        # รอให้หน้าเว็บเปลี่ยน
+        self.update_status(f"{profile_name}: รอล็อคอินเสร็จ...", "blue")
+        time.sleep(random.uniform(5, 8))  # รอแบบสุ่ม
+
+        # จำลองการอ่านหน้าเว็บหลังล็อคอิน
+        if random.random() < 0.3:
+            self.human_like_scroll(driver, "down")
+            time.sleep(random.uniform(0.5, 1.0))
+
+        # ตรวจสอบว่าเจอหน้า error หรือไม่
+        current_url = driver.current_url
+
+        try:
+            page_source = driver.page_source.lower()
+        except:
+            page_source = ""
+
+        # ตรวจสอบหน้า ERR_TOO_MANY_REDIRECTS หรือ error อื่นๆ
+        if "err_too_many_redirects" in page_source or "this page isn't working" in page_source or "redirected you too many times" in page_source:
+            # ลองรีเฟรชหน้าเว็บ
+            self.update_status(f"{profile_name}: พบ redirect error กำลังลองใหม่...", "orange")
+            driver.get("https://www.facebook.com/")
+            time.sleep(5)
+
+            current_url = driver.current_url
+            try:
+                page_source = driver.page_source.lower()
+            except:
+                page_source = ""
+
+            # ตรวจสอบอีกครั้ง
+            if "err_too_many_redirects" in page_source or "this page isn't working" in page_source:
+                raise Exception("Facebook ตรวจพบ automation และบล็อคการเข้าถึง (ERR_TOO_MANY_REDIRECTS)")
+
+        # ตรวจสอบว่ายังอยู่หน้า login หรือไม่ (ล็อคอินไม่สำเร็จ)
+        if "login" in current_url.lower():
+            try:
+                if driver.find_elements(By.NAME, "email"):
+                    raise Exception("ล็อคอินไม่สำเร็จ - ยังอยู่หน้า login")
+            except:
+                pass
+
+        # ตรวจสอบว่าเจอหน้ายืนยันตัวตนหรือไม่ (ทุกรูปแบบ)
+        auth_keywords = ["two_step_verification", "checkpoint", "auth_platform/afad", "login/device-based", "login/identify"]
+        is_auth_page = any(keyword in current_url for keyword in auth_keywords)
+
+        if is_auth_page:
+            self.update_status(f"{profile_name}: พบหน้ายืนยันตัวตน", "orange")
+            self.root.after(0, lambda pn=profile_name: messagebox.showinfo("ยืนยันตัวตน", f"กรุณายืนยันตัวตนสำหรับ Profile: {pn}\nเมื่อเสร็จแล้วกด OK"))
+
+            # รอจนกว่าจะกลับไปหน้า Facebook หลัก
+            max_wait = 300  # รอสูงสุด 5 นาที
+            wait_count = 0
+
+            while wait_count < max_wait:
+                time.sleep(2)
+                wait_count += 2
+                current_url = driver.current_url
+
+                # ตรวจสอบว่ากลับไปหน้า Facebook หลักแล้วหรือยัง
+                is_still_auth = any(keyword in current_url for keyword in auth_keywords)
+
+                if "facebook.com" in current_url and not is_still_auth:
+                    self.update_status(f"{profile_name}: ยืนยันตัวตนสำเร็จ กำลังรอ 10 วินาที...", "green")
+                    time.sleep(10)  # รอ 10 วินาทีหลังยืนยันตัวตนเสร็จ
+                    break
+
+            if wait_count >= max_wait:
+                raise Exception("หมดเวลารอการยืนยันตัวตน")
+
+            # กลับไปหน้า Facebook เริ่มต้นก่อน
+            self.update_status(f"{profile_name}: กลับไปหน้า Facebook หลัก...", "blue")
+            driver.get("https://www.facebook.com/")
+            time.sleep(3)
+
     def _save_cookies_to_ini(self, driver, ini_path, force=False):
         """บันทึก Cookies จาก Selenium driver ลงไฟล์ .ini section [FBAccount] (เหมือน FBMKP)
         จะบันทึกเฉพาะเมื่อไฟล์ .ini ยังไม่มี Cookies เท่านั้น เว้นแต่ force=True (ใช้เมื่อ Cookie เก่าหมดอายุแล้ว login ใหม่สำเร็จ)"""
@@ -1746,19 +1976,7 @@ class FacebookMarketplaceRenewer:
             if not os.path.exists(config_file_path):
                 raise Exception(f"ไม่พบไฟล์ {config_file_path}")
             
-            # อ่านไฟล์ config
-            config = configparser.ConfigParser()
-            config.read(config_file_path, encoding='utf-8')
-            
-            # อ่านข้อมูลล็อคอินจาก section [FBAccount]
-            user_id = ""
-            password = ""
-            
-            if config.has_section('FBAccount'):
-                if config.has_option('FBAccount', 'UserID'):
-                    user_id = config.get('FBAccount', 'UserID').strip()
-                if config.has_option('FBAccount', 'Password'):
-                    password = config.get('FBAccount', 'Password').strip()
+            user_id, password = self._read_credentials(config_file_path)
 
             # อ่าน Cookies แบบ raw เพื่อหลีกเลี่ยงปัญหา ; และ % ใน configparser (เหมือน FBMKP)
             cookies_raw = self._read_cookies_from_ini(config_file_path)
@@ -1883,179 +2101,7 @@ class FacebookMarketplaceRenewer:
                 if not (user_id and password):
                     raise Exception(f"Cookie ของ Profile '{profile_name}' หมดอายุ และไม่มี UserID/Password สำรอง - กรุณา Login ด้วยมือใหม่ (ปุ่ม \"Login ด้วยมือ (บันทึก Cookie)\")")
 
-                self.update_status(f"{profile_name}: กำลังล็อคอิน...", "blue")
-
-                # รอให้ช่อง email ปรากฏ (ใช้ name="email" แทน ID)
-                email_field = WebDriverWait(driver, 15).until(
-                    EC.element_to_be_clickable((By.NAME, "email"))
-                )
-                
-                # เลื่อนหน้าจอไปที่ช่อง email แบบมนุษย์
-                self.human_like_scroll_to_element(driver, email_field)
-                time.sleep(random.uniform(0.6, 1.2))
-                
-                # เคลื่อนเมาส์ไปมาก่อนคลิก (เหมือนกำลังมองหา)
-                if random.random() < 0.5:
-                    self.random_mouse_movement(driver)
-                
-                email_field.click()
-                time.sleep(random.uniform(0.5, 1.0))
-                self.human_like_clear_field(email_field, driver)
-                time.sleep(random.uniform(0.3, 0.7))
-                
-                # พิมพ์แบบมนุษย์
-                self.human_like_type(email_field, user_id, driver)
-                
-                time.sleep(random.uniform(0.8, 1.8))
-                
-                # กรอก Password (ช่องล่าง)
-                password_field = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.NAME, "pass"))
-                )
-                
-                # เลื่อนหน้าจอไปที่ช่อง password แบบมนุษย์
-                self.human_like_scroll_to_element(driver, password_field)
-                time.sleep(random.uniform(0.5, 1.0))
-                
-                password_field.click()
-                time.sleep(random.uniform(0.5, 1.0))
-                self.human_like_clear_field(password_field, driver)
-                time.sleep(random.uniform(0.3, 0.7))
-                
-                # พิมพ์แบบมนุษย์
-                self.human_like_type(password_field, password, driver)
-                
-                time.sleep(random.uniform(1.0, 2.0))
-                
-                # กดปุ่มล็อคอิน - ลองหลายวิธี
-                self.update_status(f"{profile_name}: กำลังกดปุ่มล็อคอิน...", "blue")
-                
-                # เคลื่อนเมาส์สุ่มก่อนกดปุ่ม
-                if random.random() < 0.3:
-                    self.random_mouse_movement(driver)
-                    time.sleep(random.uniform(0.3, 0.7))
-                
-                login_clicked = False
-                
-                # วิธีที่ 1: ใช้ XPath หาจากข้อความ "Log in" หรือ "เข้าสู่ระบบ"
-                try:
-                    login_button = WebDriverWait(driver, 10).until(
-                        EC.element_to_be_clickable((By.XPATH, "//span[text()='Log in' or text()='เข้าสู่ระบบ']"))
-                    )
-                    login_button.click()
-                    login_clicked = True
-                    self.update_status(f"{profile_name}: กดปุ่มล็อคอินสำเร็จ (วิธีที่ 1)", "green")
-                except Exception as e1:
-                    self.update_status(f"{profile_name}: ลองวิธีที่ 2...", "blue")
-                    
-                    # วิธีที่ 2: หาปุ่มจาก type="submit"
-                    try:
-                        login_button = WebDriverWait(driver, 5).until(
-                            EC.element_to_be_clickable((By.XPATH, "//button[@type='submit' and @name='login']"))
-                        )
-                        login_button.click()
-                        login_clicked = True
-                        self.update_status(f"{profile_name}: กดปุ่มล็อคอินสำเร็จ (วิธีที่ 2)", "green")
-                    except Exception as e2:
-                        self.update_status(f"{profile_name}: ลองวิธีที่ 3...", "blue")
-                        
-                        # วิธีที่ 3: หาปุ่มจาก data-testid
-                        try:
-                            login_button = WebDriverWait(driver, 5).until(
-                                EC.element_to_be_clickable((By.XPATH, "//button[@data-testid='royal_login_button']"))
-                            )
-                            login_button.click()
-                            login_clicked = True
-                            self.update_status(f"{profile_name}: กดปุ่มล็อคอินสำเร็จ (วิธีที่ 3)", "green")
-                        except Exception as e3:
-                            self.update_status(f"{profile_name}: ลองวิธีที่ 4...", "blue")
-                            
-                            # วิธีที่ 4: กด Enter ที่ช่อง password
-                            try:
-                                from selenium.webdriver.common.keys import Keys
-                                password_field.send_keys(Keys.RETURN)
-                                login_clicked = True
-                                self.update_status(f"{profile_name}: กดปุ่มล็อคอินสำเร็จ (วิธีที่ 4)", "green")
-                            except Exception as e4:
-                                raise Exception(f"ไม่สามารถกดปุ่มล็อคอินได้ทุกวิธี: {str(e1)}, {str(e2)}, {str(e3)}, {str(e4)}")
-                
-                if not login_clicked:
-                    raise Exception("ไม่สามารถกดปุ่มล็อคอินได้")
-                
-                # รอให้หน้าเว็บเปลี่ยน
-                self.update_status(f"{profile_name}: รอล็อคอินเสร็จ...", "blue")
-                time.sleep(random.uniform(5, 8))  # รอแบบสุ่ม
-                
-                # จำลองการอ่านหน้าเว็บหลังล็อคอิน
-                if random.random() < 0.3:
-                    self.human_like_scroll(driver, "down")
-                    time.sleep(random.uniform(0.5, 1.0))
-                
-                # ตรวจสอบว่าเจอหน้า error หรือไม่
-                current_url = driver.current_url
-                
-                try:
-                    page_source = driver.page_source.lower()
-                except:
-                    page_source = ""
-                
-                # ตรวจสอบหน้า ERR_TOO_MANY_REDIRECTS หรือ error อื่นๆ
-                if "err_too_many_redirects" in page_source or "this page isn't working" in page_source or "redirected you too many times" in page_source:
-                    # ลองรีเฟรชหน้าเว็บ
-                    self.update_status(f"{profile_name}: พบ redirect error กำลังลองใหม่...", "orange")
-                    driver.get("https://www.facebook.com/")
-                    time.sleep(5)
-                    
-                    current_url = driver.current_url
-                    try:
-                        page_source = driver.page_source.lower()
-                    except:
-                        page_source = ""
-                    
-                    # ตรวจสอบอีกครั้ง
-                    if "err_too_many_redirects" in page_source or "this page isn't working" in page_source:
-                        raise Exception("Facebook ตรวจพบ automation และบล็อคการเข้าถึง (ERR_TOO_MANY_REDIRECTS)")
-                
-                # ตรวจสอบว่ายังอยู่หน้า login หรือไม่ (ล็อคอินไม่สำเร็จ)
-                if "login" in current_url.lower():
-                    try:
-                        if driver.find_elements(By.NAME, "email"):
-                            raise Exception("ล็อคอินไม่สำเร็จ - ยังอยู่หน้า login")
-                    except:
-                        pass
-                
-                # ตรวจสอบว่าเจอหน้ายืนยันตัวตนหรือไม่ (ทุกรูปแบบ)
-                auth_keywords = ["two_step_verification", "checkpoint", "auth_platform/afad", "login/device-based", "login/identify"]
-                is_auth_page = any(keyword in current_url for keyword in auth_keywords)
-                
-                if is_auth_page:
-                    self.update_status(f"{profile_name}: พบหน้ายืนยันตัวตน", "orange")
-                    self.root.after(0, lambda pn=profile_name: messagebox.showinfo("ยืนยันตัวตน", f"กรุณายืนยันตัวตนสำหรับ Profile: {pn}\nเมื่อเสร็จแล้วกด OK"))
-                    
-                    # รอจนกว่าจะกลับไปหน้า Facebook หลัก
-                    max_wait = 300  # รอสูงสุด 5 นาที
-                    wait_count = 0
-                    
-                    while wait_count < max_wait:
-                        time.sleep(2)
-                        wait_count += 2
-                        current_url = driver.current_url
-                        
-                        # ตรวจสอบว่ากลับไปหน้า Facebook หลักแล้วหรือยัง
-                        is_still_auth = any(keyword in current_url for keyword in auth_keywords)
-                        
-                        if "facebook.com" in current_url and not is_still_auth:
-                            self.update_status(f"{profile_name}: ยืนยันตัวตนสำเร็จ กำลังรอ 10 วินาที...", "green")
-                            time.sleep(10)  # รอ 10 วินาทีหลังยืนยันตัวตนเสร็จ
-                            break
-                    
-                    if wait_count >= max_wait:
-                        raise Exception("หมดเวลารอการยืนยันตัวตน")
-                    
-                    # กลับไปหน้า Facebook เริ่มต้นก่อน
-                    self.update_status(f"{profile_name}: กลับไปหน้า Facebook หลัก...", "blue")
-                    driver.get("https://www.facebook.com/")
-                    time.sleep(3)
+                self._password_login(driver, profile_name, user_id, password)
 
             # บันทึก Cookie ใหม่ไว้ใช้ครั้งต่อไป - เขียนทับเฉพาะตอน Cookie เดิมพิสูจน์แล้วว่าหมดอายุ
             # เคยเขียนทับทุกรอบที่ Chrome ล็อคอินค้างอยู่แล้วด้วย (ไม่ได้ลอง Cookie = นับว่าไม่ผ่าน)
