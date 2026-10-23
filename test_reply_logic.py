@@ -979,6 +979,77 @@ def test_manual_login_moves_to_the_tab_that_is_left():
     assert [c["value"] for c in ini_cookies(a.profiles["ID7"]["config_file"]) if c["name"] == "c_user"] == ["NEW"]
 
 
+def fbmkp_folder(ini_files):
+    """โฟลเดอร์ FBMKP ปลอม: profiles/profile_settings.json + โฟลเดอร์ Chrome ของทุกโปรไฟล์ที่ระบุ"""
+    import json
+    folder = tempfile.mkdtemp()
+    os.makedirs(os.path.join(folder, "profiles"))
+    for name in ini_files:
+        os.makedirs(os.path.join(folder, "profiles", name))
+    with open(os.path.join(folder, "profiles", "profile_settings.json"), "w", encoding="utf-8") as f:
+        json.dump({"ini_files": ini_files}, f)
+    return folder
+
+
+def test_fbmkp_profile_is_found_by_its_ini_file():
+    # ลูกค้าขอให้ Renew ใช้ล็อคอินของ FBMKP: หาโปรไฟล์ FBMKP ที่ใช้ไฟล์ .ini เดียวกัน
+    folder = fbmkp_folder({"ID7": "D:/acc/ID7.ini", "ID8": "D:/acc/ID8.ini",
+                           "copyA": "D:/acc/dup.ini", "copyB": "D:/acc/dup.ini"})
+    a = App.__new__(App)
+    a.fbmkp_folder = folder
+    assert a.fbmkp_chrome_dir("D:/acc/ID7.ini") == os.path.join(folder, "profiles", "ID7")
+    assert a.fbmkp_chrome_dir("E:/moved/ID8.ini") == os.path.join(folder, "profiles", "ID8")  # ย้ายไฟล์ไปที่อื่น
+    assert a.fbmkp_chrome_dir("D:/acc/dup.ini") is None  # สองโปรไฟล์ใช้ไฟล์เดียวกัน เดาไม่ได้
+    assert a.fbmkp_chrome_dir("D:/acc/ID9.ini") is None
+    os.rmdir(os.path.join(folder, "profiles", "ID7"))
+    assert a.fbmkp_chrome_dir("D:/acc/ID7.ini") is None  # FBMKP ยังไม่เคยเปิดโปรไฟล์นี้
+    a.fbmkp_folder = ""
+    assert a.fbmkp_chrome_dir("D:/acc/ID8.ini") is None
+
+
+def test_chrome_dir_uses_fbmkp_only_when_it_is_free():
+    folder = fbmkp_folder({"ID7": "D:/acc/ID7.ini"})
+    a = reply_app()
+    a.fbmkp_folder = folder
+    a.profiles = {"ID7": {"config_file": "D:/acc/ID7.ini", "chrome_profile": "chrome_profile_ID7"},
+                  "ID9": {"config_file": "D:/acc/ID9.ini", "chrome_profile": "chrome_profile_ID9"}}
+    a.chrome_open_on = lambda d: False
+    assert a.chrome_dir("ID7") == os.path.join(folder, "profiles", "ID7")
+    assert a.chrome_dir("ID9") == os.path.join(os.getcwd(), "chrome_profile_ID9")  # ไม่มีใน FBMKP ใช้ของตัวเอง
+    a.chrome_open_on = lambda d: True  # FBMKP เปิดเฟสนี้ค้างอยู่ Chrome เปิดโฟลเดอร์เดียวกันซ้อนไม่ได้
+    err = None
+    try:
+        a.chrome_dir("ID7")
+    except Exception as e:
+        err = str(e)
+    assert err and "ปิดหน้าต่างนั้นก่อน" in err
+
+
+def test_chrome_open_on_reads_the_main_chrome_process():
+    import sys, types
+    folder = tempfile.mkdtemp()
+    other = tempfile.mkdtemp()
+
+    def proc(*cmdline):
+        return types.SimpleNamespace(info={"name": "chrome.exe", "cmdline": list(cmdline)})
+
+    def with_procs(*procs):
+        old = sys.modules.get("psutil")
+        sys.modules["psutil"] = types.SimpleNamespace(process_iter=lambda attrs: list(procs))
+        try:
+            return app.chrome_open_on(folder)
+        finally:
+            if old is None:
+                del sys.modules["psutil"]
+            else:
+                sys.modules["psutil"] = old
+
+    assert with_procs(proc("chrome.exe", f'--user-data-dir="{folder}"', "--no-first-run"))
+    assert not with_procs(proc("chrome.exe", "--type=renderer", f"--user-data-dir={folder}"))  # ตัวลูกค้างหลังปิด
+    assert not with_procs(proc("chrome.exe", f"--user-data-dir={other}"))
+    assert not with_procs(types.SimpleNamespace(info={"name": "chrome.exe", "cmdline": None}))
+
+
 def test_wrong_password_is_reported_not_called_success():
     # เคย raise ไว้ใน try/except: pass รหัสผิดก็ผ่านออกไปเงียบๆ แล้วขึ้น Login สำเร็จ
     a = password_app()
@@ -1069,6 +1140,9 @@ if __name__ == "__main__":
     test_password_login_does_not_trust_a_page_that_bounces_back()
     test_manual_login_ok_reloads_home_before_giving_up()
     test_manual_login_moves_to_the_tab_that_is_left()
+    test_fbmkp_profile_is_found_by_its_ini_file()
+    test_chrome_dir_uses_fbmkp_only_when_it_is_free()
+    test_chrome_open_on_reads_the_main_chrome_process()
     test_typing_emoji_does_not_break_the_message()
     test_reply_settings_file_is_replaced_whole()
     test_new_notify_statuses_have_their_own_wording()

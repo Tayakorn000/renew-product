@@ -35,7 +35,7 @@ except Exception:
 
 # เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
 # ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
-APP_VERSION = 8
+APP_VERSION = 9
 UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
 UPDATE_FILE = "renew_update.py"
 
@@ -161,7 +161,96 @@ class FacebookMarketplaceRenewer:
             print("ไม่สามารถ import psutil ได้ (ติดตั้งด้วย: pip install psutil)")
         except Exception as e:
             print(f"Error ในการปิด Chrome: {e}")
-    
+
+    def chrome_open_on(self, user_data_dir):
+        """มี Chrome เปิดโฟลเดอร์นี้อยู่ไหม (Chrome เปิดโฟลเดอร์เดียวกันซ้อนสองตัวไม่ได้)
+        ดูแค่ตัวหลัก ข้ามตัวลูก (--type=renderer ฯลฯ) ที่อาจค้างอยู่แป๊บนึงหลังปิด"""
+        try:
+            import psutil
+        except ImportError:
+            return False
+        want = os.path.normcase(os.path.abspath(user_data_dir))
+        for proc in psutil.process_iter(['name', 'cmdline']):
+            try:
+                cmdline = [str(a) for a in (proc.info['cmdline'] or [])]
+                if 'chrome' not in (proc.info['name'] or '').lower() or any(a.startswith('--type=') for a in cmdline):
+                    continue
+                for a in cmdline:
+                    if a.startswith('--user-data-dir=') and \
+                            os.path.normcase(os.path.abspath(a.split('=', 1)[1].strip('"'))) == want:
+                        return True
+            except Exception:
+                continue
+        return False
+
+    def fbmkp_chrome_dir(self, config_file):
+        """โฟลเดอร์ Chrome ของ FBMKP ที่ใช้ไฟล์ .ini เดียวกับ Profile นี้ ไม่เจอหรือเจอหลายอัน = None
+        FBMKP จดไว้ใน profiles/profile_settings.json ว่าโปรไฟล์ไหนใช้ .ini ไหน"""
+        folder = getattr(self, 'fbmkp_folder', '')
+        if not folder or not config_file:
+            return None
+        try:
+            with open(os.path.join(folder, "profiles", "profile_settings.json"), encoding='utf-8') as f:
+                ini_files = json.load(f).get('ini_files') or {}
+        except Exception:
+            return None
+
+        def same(a, b):
+            return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+        names = [n for n, p in ini_files.items() if p and same(p, config_file)]
+        if not names:  # ไฟล์ .ini อยู่คนละที่กันแต่ชื่อไฟล์เดียวกัน
+            names = [n for n, p in ini_files.items()
+                     if p and os.path.basename(p).lower() == os.path.basename(config_file).lower()]
+        if len(names) != 1:
+            return None
+        chrome_dir = os.path.join(folder, "profiles", names[0])
+        return chrome_dir if os.path.isdir(chrome_dir) else None
+
+    def chrome_dir(self, profile_name):
+        """โฟลเดอร์ Chrome ที่ใช้เปิดเฟสนี้: เชื่อม FBMKP ไว้ = ใช้ของ FBMKP (ล็อคอินที่ไหนก็เข้าทั้งสองโปรแกรม
+        Facebook เห็นเป็นเครื่องเดียว) ไม่งั้นใช้ของ Renew เอง"""
+        data = self.profiles[profile_name]
+        linked = self.fbmkp_chrome_dir(data.get('config_file', ''))
+        if not linked:
+            return os.path.join(os.getcwd(), data['chrome_profile'])
+        if self.chrome_open_on(linked):
+            raise Exception("เฟสนี้เปิด Chrome ค้างอยู่ (ใน FBMKP หรือหน้าต่างที่ Renew เปิดไว้) "
+                            "ปิดหน้าต่างนั้นก่อนแล้วลองใหม่")
+        self.update_status(f"{profile_name}: ใช้ Chrome ของ FBMKP ({os.path.basename(linked)})", "blue")
+        return linked
+
+    def pick_fbmkp_folder(self):
+        """เลือกโฟลเดอร์โปรแกรม FBMKP (ที่มีโฟลเดอร์ profiles) กดยกเลิกตอนเชื่อมอยู่ = ถามว่าจะเลิกเชื่อมไหม"""
+        folder = filedialog.askdirectory(title="เลือกโฟลเดอร์โปรแกรม FBMKP (ที่มีโฟลเดอร์ profiles)")
+        if not folder:
+            if self.fbmkp_folder and messagebox.askyesno("เลิกเชื่อม FBMKP", "เลิกใช้ล็อคอินของ FBMKP แล้วกลับไปใช้ Chrome ของ Renew เองไหม"):
+                self.fbmkp_folder = ''
+                self.save_settings()
+                self.show_fbmkp_folder()
+            return
+        if os.path.exists(os.path.join(folder, "profile_settings.json")):  # เลือกโฟลเดอร์ profiles มาเลย
+            folder = os.path.dirname(folder)
+        if not os.path.exists(os.path.join(folder, "profiles", "profile_settings.json")):
+            messagebox.showwarning("ไม่ใช่โฟลเดอร์ FBMKP",
+                                   "ในโฟลเดอร์นี้ไม่มี profiles\\profile_settings.json\n"
+                                   "เลือกโฟลเดอร์ที่มีไฟล์โปรแกรม FBMKP อยู่ (เปิด FBMKP อย่างน้อย 1 ครั้งก่อน)")
+            return
+        self.fbmkp_folder = folder
+        self.save_settings()
+        self.show_fbmkp_folder()
+        linked = [n for n, d in self.profiles.items() if self.fbmkp_chrome_dir(d.get('config_file', ''))]
+        messagebox.showinfo("เชื่อม FBMKP แล้ว",
+                            f"เจอ {len(linked)}/{len(self.profiles)} เฟสที่ใช้ไฟล์ .ini เดียวกับ FBMKP\n"
+                            "เฟสพวกนี้จะเปิด Chrome ของ FBMKP ล็อคอินที่ไหนก็เข้าทั้งสองโปรแกรม\n"
+                            "เปิดเฟสเดียวกันพร้อมกันสองโปรแกรมไม่ได้ ต้องปิดอีกฝั่งก่อน")
+
+    def show_fbmkp_folder(self):
+        if self.fbmkp_folder:
+            self.fbmkp_btn.config(text="FBMKP: เชื่อมแล้ว", bg="#1877F2", fg="white")
+        else:
+            self.fbmkp_btn.config(text="เชื่อมล็อคอิน FBMKP", bg="#E0E0E0", fg="black")
+
     def random_sleep(self, min_sec=1, max_sec=3):
         """หน่วงเวลาแบบสุ่มเพื่อให้ดูเป็นธรรมชาติ"""
         time.sleep(random.uniform(min_sec, max_sec))
@@ -323,15 +412,21 @@ class FacebookMarketplaceRenewer:
                     settings = json.load(f)
                     self.profiles = settings.get('profiles', {})
                     self.current_profile = settings.get('current_profile', None)
+                    self.fbmkp_folder = settings.get('fbmkp_folder')
         except Exception:
             pass
-    
+        # ยังไม่เคยตั้ง: เครื่องลูกค้าลง FBMKP ไว้ที่ D:\FBMKP Program (เลิกเชื่อมแล้วเป็น '' ไม่เดาซ้ำ)
+        if getattr(self, 'fbmkp_folder', None) is None:
+            guess = r"D:\FBMKP Program"
+            self.fbmkp_folder = guess if os.path.exists(os.path.join(guess, "profiles", "profile_settings.json")) else ''
+
     def save_settings(self):
         """บันทึกการตั้งค่า"""
         try:
             settings = {
                 'profiles': self.profiles,
-                'current_profile': self.current_profile
+                'current_profile': self.current_profile,
+                'fbmkp_folder': self.fbmkp_folder,
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
@@ -485,6 +580,11 @@ class FacebookMarketplaceRenewer:
         # แถวปุ่ม Auto Cookie Login
         auto_login_frame = tk.Frame(list_frame)
         auto_login_frame.pack(fill=tk.X, pady=(0, 3))
+
+        # ใช้โฟลเดอร์ Chrome ของ FBMKP แทนของตัวเอง ล็อคอินที่ไหนก็เข้าทั้งสองโปรแกรม (ลูกค้าขอ 23 ต.ค.)
+        self.fbmkp_btn = tk.Button(auto_login_frame, command=self.pick_fbmkp_folder, font=("Arial", 9), cursor="hand2")
+        self.fbmkp_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        self.show_fbmkp_folder()
 
         self.auto_cookie_login_btn = tk.Button(
             auto_login_frame,
@@ -830,7 +930,7 @@ class FacebookMarketplaceRenewer:
         """เปิด Chrome ด้วย Profile ที่เลือก ให้ผู้ใช้ Login เองในหน้าต่างจริง แล้วบันทึก Cookie"""
         profile_data = self.profiles[profile_name]
         config_file_path = profile_data['config_file']
-        chrome_profile_dir = os.path.join(os.getcwd(), profile_data['chrome_profile'])
+        chrome_profile_dir = self.chrome_dir(profile_name)
 
         if not os.path.exists(chrome_profile_dir):
             os.makedirs(chrome_profile_dir)
@@ -1018,7 +1118,7 @@ class FacebookMarketplaceRenewer:
             try:
                 profile_data = self.profiles[profile_name]
                 config_file_path = profile_data['config_file']
-                chrome_profile_dir = os.path.join(os.getcwd(), profile_data['chrome_profile'])
+                chrome_profile_dir = self.chrome_dir(profile_name)
 
                 if not os.path.exists(config_file_path):
                     raise Exception(f"ไม่พบไฟล์ .ini: {config_file_path}")
@@ -1999,7 +2099,7 @@ class FacebookMarketplaceRenewer:
             # ดึงข้อมูล Profile
             profile_data = self.profiles[profile_name]
             config_file_path = profile_data['config_file']
-            chrome_profile_dir = os.path.join(os.getcwd(), profile_data['chrome_profile'])
+            chrome_profile_dir = self.chrome_dir(profile_name)
             
             # ตรวจสอบว่าไฟล์ยังอยู่หรือไม่
             if not os.path.exists(config_file_path):
