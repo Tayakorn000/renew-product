@@ -862,7 +862,121 @@ def test_password_login_gets_past_the_remembered_account_page():
 
     drv = Chooser()
     password_app()._password_login(drv, "ID7", "a", "b")
-    assert drv.get_cookie("c_user") and drv.visited == []
+    # ไม่ต้องไปหน้า /login/ มีแค่โหลดหน้าหลักเช็คซ้ำตอนจบ
+    assert drv.get_cookie("c_user") and drv.visited == ["https://www.facebook.com/"]
+
+
+class Timeline(FakeDriver):
+    """Chrome ที่หน้าเปลี่ยนไปตามเวลาที่โปรแกรมรอ steps = [(วินาทีที่เริ่ม, url, cookies, มีฟอร์ม Login ไหม)]
+    driver.get() ไม่เปลี่ยนหน้า = Facebook เด้งกลับหน้าเดิม (ยังไม่ผ่าน) หรืออยู่หน้าหลักอยู่แล้ว"""
+    def __init__(self, steps):
+        super().__init__()
+        self.steps, self.t = steps, 0
+
+    def tick(self, seconds):
+        self.t += seconds
+
+    def now(self):
+        return [s for s in self.steps if s[0] <= self.t][-1]
+
+    @property
+    def current_url(self):
+        return self.now()[1]
+
+    @current_url.setter
+    def current_url(self, value):
+        pass
+
+    def get_cookie(self, name):
+        return next((c for c in self.now()[2] if c["name"] == name), None)
+
+    def find_elements(self, by, value):
+        return [FakeEl()] if self.now()[3] and value in ("email", "pass") else []
+
+
+def password_login_over_time(steps):
+    """กรอกรหัสกับ Chrome ที่หน้าเปลี่ยนตามเวลา คืน (error หรือ None, Chrome ปลอม, สถานะที่ขึ้น)"""
+    a, drv = password_app(), Timeline(steps)
+    renew_product.time.sleep = drv.tick
+    try:
+        a._password_login(drv, "ID7", "a", "b")
+        err = None
+    except Exception as e:
+        err = str(e)
+    finally:
+        renew_product.time.sleep = lambda s: None
+    return err, drv, a.statuses
+
+
+def test_password_login_waits_on_a_check_page_it_does_not_know():
+    # 23 ต.ค. Facebook ขอยืนยันตัวตนหน้าแบบที่ไม่อยู่ในรายชื่อ URL เคยนับว่ารหัสผิดแล้วปิด Chrome ลูกค้ายืนยันไม่ได้
+    err, drv, statuses = password_login_over_time([
+        (0, "https://www.facebook.com/some_new_check/", [], False),
+        (60, "https://www.facebook.com/", USER, False)])
+    assert err is None and drv.t >= 60
+    assert any("รอยืนยันตัวตนใน Chrome (/some_new_check/)" in s for s in statuses)
+
+
+def test_password_login_waits_on_the_saved_account_password_page():
+    # หน้า login/device-based มีช่องรหัสให้ลูกค้ากรอกเอง ไม่ใช่รหัสผิด ห้ามตัดจบที่ 30 วิ
+    err, drv, _ = password_login_over_time([
+        (0, "https://www.facebook.com/login/device-based/regular/login/", [], True),
+        (40, "https://www.facebook.com/", USER, False)])
+    assert err is None and drv.t >= 40
+
+
+def test_password_login_does_not_trust_a_page_that_bounces_back():
+    # หน้าแปลกที่มี c_user แต่ยังไม่ผ่าน โหลดหน้าหลักแล้วเด้งกลับ ห้ามนับว่าเข้าแล้ว (ไฟล์ .ini ใช้ร่วมกับ FBMKP)
+    # และโหลดซ้ำแค่ครั้งเดียว ไม่งั้นทับหน้าที่ลูกค้ากำลังกรอกทุก 2 วิ
+    err, drv, _ = password_login_over_time([
+        (0, "https://www.facebook.com/unknown_gate/", USER, False),
+        (20, "https://www.facebook.com/", USER, False)])
+    assert err is None and drv.t >= 20 and len(drv.visited) == 2
+
+
+def test_manual_login_ok_reloads_home_before_giving_up():
+    # 23 ต.ค. ลูกค้าเข้าหน้าหลักได้แล้วกด OK ไม่บันทึก ต้องปิดเปิด Chrome ใหม่ แท็บที่โปรแกรมคุมยังเห็นหน้า Login อยู่
+    import types
+
+    class StaleTab(FakeDriver):
+        def find_elements(self, by, value):
+            return [FakeEl()] if "login" in self.current_url else []
+
+    drv = StaleTab([{"name": "c_user", "value": "NEW"}])
+    a = login_app(drv)
+    a.root = types.SimpleNamespace(after=lambda ms, fn=None: fn and fn())
+    old_box = renew_product.messagebox
+    renew_product.messagebox = types.SimpleNamespace(showinfo=lambda *x, **k: None)  # กด OK ทันที
+    try:
+        a.manual_login_and_save_cookies("ID7")
+    finally:
+        renew_product.messagebox = old_box
+    assert [c["value"] for c in ini_cookies(a.profiles["ID7"]["config_file"]) if c["name"] == "c_user"] == ["NEW"]
+
+
+def test_manual_login_moves_to_the_tab_that_is_left():
+    # แท็บที่โปรแกรมคุมถูกปิด แต่ Chrome ยังเปิดอยู่ ต้องย้ายไปแท็บที่เหลือ ไม่ใช่สรุปว่าปิด Chrome แล้ว
+    import types
+
+    class ClosedTab(FakeDriver):
+        tab = "gone"
+
+        @property
+        def current_url(self):
+            if self.tab == "gone":
+                raise RuntimeError("no such window")
+            return "https://www.facebook.com/"
+
+        @current_url.setter
+        def current_url(self, value):
+            pass
+
+    drv = ClosedTab([{"name": "c_user", "value": "NEW"}])
+    drv.window_handles = ["B"]
+    drv.switch_to = types.SimpleNamespace(window=lambda h: setattr(drv, "tab", h))
+    a = login_app(drv)
+    a.manual_login_and_save_cookies("ID7")
+    assert [c["value"] for c in ini_cookies(a.profiles["ID7"]["config_file"]) if c["name"] == "c_user"] == ["NEW"]
 
 
 def test_wrong_password_is_reported_not_called_success():
@@ -950,6 +1064,11 @@ if __name__ == "__main__":
     test_logged_in_needs_the_cookie_and_no_login_form()
     test_wrong_password_is_reported_not_called_success()
     test_password_login_gets_past_the_remembered_account_page()
+    test_password_login_waits_on_a_check_page_it_does_not_know()
+    test_password_login_waits_on_the_saved_account_password_page()
+    test_password_login_does_not_trust_a_page_that_bounces_back()
+    test_manual_login_ok_reloads_home_before_giving_up()
+    test_manual_login_moves_to_the_tab_that_is_left()
     test_typing_emoji_does_not_break_the_message()
     test_reply_settings_file_is_replaced_whole()
     test_new_notify_statuses_have_their_own_wording()

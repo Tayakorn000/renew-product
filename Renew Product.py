@@ -35,7 +35,7 @@ except Exception:
 
 # เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
 # ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
-APP_VERSION = 7
+APP_VERSION = 8
 UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
 UPDATE_FILE = "renew_update.py"
 
@@ -870,39 +870,56 @@ class FacebookMarketplaceRenewer:
             waited = 0
             stable = 0
             cookies = None  # Cookie ชุดล่าสุดตอนที่ Login อยู่ ปิด Chrome ไปแล้วก็ยังบันทึกชุดนี้ได้
+            gates = set()  # หน้าที่โหลดหน้าหลักซ้ำแล้วเด้งกลับ = ยังติดยืนยันอยู่ ไม่โหลดทับซ้ำตอนลูกค้ากำลังทำ
             while waited < max_wait:
                 time.sleep(2)
                 waited += 2
                 try:
                     current_url = driver.current_url.lower()
                     now = driver.get_cookies()
-                    on_login_form = bool(driver.find_elements(By.NAME, "pass"))
+                    on_login_form = bool(driver.find_elements(By.NAME, "pass") or driver.find_elements(By.NAME, "email")
+                                         or driver.find_elements(By.XPATH, self.OTHER_PROFILE_XPATH))
                 except Exception:
-                    break  # ปิด Chrome แล้ว
+                    # แท็บที่โปรแกรมคุมถูกปิด แต่ Chrome ยังเปิดอยู่ ย้ายไปแท็บที่เหลือ ไม่ใช่สรุปว่าปิด Chrome แล้ว
+                    try:
+                        driver.switch_to.window(driver.window_handles[-1])
+                        continue
+                    except Exception:
+                        break  # ปิด Chrome แล้ว
 
                 # หน้ายืนยันตัวตน (checkpoint / ยืนยัน 2 ชั้น) มี c_user แล้วแต่ยังใช้ไม่ได้ ห้ามเก็บ
                 # ไม่งั้นกด OK หรือปิด Chrome กลางทาง = ทับ .ini ด้วย session ที่เปิดมาก็ติด checkpoint (FBMKP ใช้ไฟล์เดียวกัน)
                 verifying = any(k in current_url for k in (
                     'checkpoint', 'two_step_verification', 'auth_platform', 'afad', 'confirmemail', 'recover'))
-                logged_in = any(c.get('name') == 'c_user' for c in now) and not on_login_form and not verifying
+                path = urllib.parse.urlparse(current_url).path
+                logged_in = (any(c.get('name') == 'c_user' for c in now) and not on_login_form and not verifying
+                             and path not in gates)
                 if logged_in:
                     cookies = now
+                # ต้องนิ่งติดกัน 3 รอบ (6 วินาที) ถึงนับว่าเสร็จ
+                stable = stable + 1 if logged_in else 0
 
-                if ok_pressed.is_set():
-                    if cookies:
+                # กด OK หรือนิ่งครบ 3 รอบ: โหลดหน้าหลักในแท็บเราเช็คซ้ำก่อนบันทึก
+                # เคยดูแค่หน้าในแท็บที่โปรแกรมคุม ลูกค้าเข้าหน้าหลักได้แล้วกด OK ก็ไม่บันทึก ต้องปิดเปิด Chrome ใหม่ (23 ต.ค.)
+                if ok_pressed.is_set() or stable >= 3:
+                    try:
+                        confirmed = self._home_confirms_login(driver)
+                    except Exception:
+                        break  # ปิด Chrome แล้ว ใช้ Cookie ชุดล่าสุดที่เห็นว่าเข้าได้
+                    if confirmed:
+                        cookies = driver.get_cookies()
                         break
-                    ok_pressed.clear()
-                    self.root.after(0, lambda: ask_done(
-                        f"{profile_name} ยังไม่ได้ Login หรือยังยืนยันตัวตนไม่เสร็จ\n\n"
-                        "ทำในหน้าต่าง Chrome ให้เสร็จก่อน แล้วกด OK อีกครั้ง"))
-
-                # ต้องนิ่งติดกัน 3 รอบ (6 วินาที) ถึงนับว่าเสร็จจริง
-                if logged_in:
-                    stable += 1
-                    if stable >= 3:
-                        break
-                else:
+                    if logged_in:  # ดูเหมือนเข้าแล้วแต่เด้งกลับหน้ายืนยัน ชุดนี้ยังใช้ไม่ได้
+                        cookies = None
+                        gates |= {path} - {"/", "/home.php"}
                     stable = 0
+                    if ok_pressed.is_set():
+                        ok_pressed.clear()
+                        self.root.after(0, lambda: ask_done(
+                            f"{profile_name} ยังไม่ได้ Login หรือยังยืนยันตัวตนไม่เสร็จ\n\n"
+                            "ทำในหน้าต่าง Chrome ให้เสร็จก่อน แล้วกด OK อีกครั้ง"))
+
+                if not logged_in:
                     self.update_status(f"{profile_name}: รอ Login / ยืนยันตัวตนใน Chrome...", "orange")
 
             if not cookies:
@@ -1632,6 +1649,14 @@ class FacebookMarketplaceRenewer:
         except Exception:
             return False
 
+    def _home_confirms_login(self, driver):
+        """โหลดหน้าหลักในแท็บที่โปรแกรมคุมแล้วเช็คซ้ำ เข้าได้จริงต้องอยู่หน้าหลักได้
+        session ที่ยังติดหน้ายืนยันอะไรอยู่ Facebook จะเด้งกลับไปหน้านั้น (ห้ามเก็บลง .ini ที่ FBMKP ใช้ร่วม)
+        Chrome ปิดไปแล้ว = error ส่งต่อให้คนเรียกตัดสินเอง"""
+        driver.get("https://www.facebook.com/")
+        time.sleep(random.uniform(4, 7))  # หน้าเลือกบัญชีวาดช้า อ่านเร็วไปเห็นหน้าว่างๆ นึกว่าเข้าแล้ว
+        return urllib.parse.urlparse(driver.current_url).path in ("/", "/home.php") and self._is_logged_in(driver)
+
     def _build_selenium_cookie(self, c):
         """แปลง cookie dict (ฟอร์แมต Playwright ของ FBMKP) เป็นฟอร์แมตที่ Selenium add_cookie รับ
         ต้องส่ง secure ไปด้วย — Chrome ตีตก cookie ที่ SameSite=None แต่ไม่มี Secure
@@ -1714,16 +1739,10 @@ class FacebookMarketplaceRenewer:
         # โหลดหน้าหลัก Facebook รอบเดียวเพื่อให้ Cookie มีผล แล้วเช็คว่าเข้าได้จริง
         # (ไม่ยิงไปหน้าปลายทางตรงนี้ ปล่อยให้ตัวเรียกเดินทางแบบคนจริงต่อเอง)
         time.sleep(random.uniform(1.0, 2.0))
-        driver.get("https://www.facebook.com/")
-        time.sleep(random.uniform(4, 7))
-
         try:
-            if self._is_login_pending_url(driver.current_url):
-                return False
+            return self._home_confirms_login(driver)
         except Exception:
             return False
-
-        return self._is_logged_in(driver)
 
     def _read_credentials(self, ini_path):
         """UserID, Password จาก section [FBAccount] (ไม่มี = ค่าว่าง)
@@ -1865,8 +1884,6 @@ class FacebookMarketplaceRenewer:
             time.sleep(random.uniform(0.5, 1.0))
 
         # ตรวจสอบว่าเจอหน้า error หรือไม่
-        current_url = driver.current_url
-
         try:
             page_source = driver.page_source.lower()
         except:
@@ -1879,7 +1896,6 @@ class FacebookMarketplaceRenewer:
             driver.get("https://www.facebook.com/")
             time.sleep(5)
 
-            current_url = driver.current_url
             try:
                 page_source = driver.page_source.lower()
             except:
@@ -1889,51 +1905,33 @@ class FacebookMarketplaceRenewer:
             if "err_too_many_redirects" in page_source or "this page isn't working" in page_source:
                 raise Exception("Facebook ตรวจพบ automation และบล็อคการเข้าถึง (ERR_TOO_MANY_REDIRECTS)")
 
-        # รอจนเข้าได้จริง หรือเจอหน้ายืนยันตัวตน (Facebook บางทีพาไปหน้าถัดไปช้า เช็คครั้งเดียวไม่พอ)
-        # เคย raise ตอนยังอยู่หน้า login ไว้ใน try/except: pass รหัสผิดก็ไม่เคยแจ้ง ขึ้น Login สำเร็จตลอด
-        auth_keywords = ["two_step_verification", "checkpoint", "auth_platform/afad", "login/device-based", "login/identify"]
-        is_auth_page = False
-        for _ in range(15):
-            if self._is_logged_in(driver):
-                return
-            current_url = driver.current_url
-            is_auth_page = any(keyword in current_url for keyword in auth_keywords)
-            if is_auth_page:
-                break
+        # รอจนเข้าได้จริง สูงสุด 5 นาที ไม่เดาจาก URL ว่าหน้าไหนคือหน้ายืนยันตัวตน
+        # เคยรู้จักแค่ไม่กี่ URL หน้ายืนยันแบบอื่น (เช่น auth_platform/codesubmit) โดนนับว่ารหัสผิดแล้วปิด Chrome
+        # หรือโดนพาออกไปหน้าหลักกลางทาง ลูกค้าเลยยืนยันตัวตนไม่ได้ (23 ต.ค.)
+        # รหัสผิด = ยังเป็นฟอร์ม Login เกิน 30 วิ (หน้า login/device-based มีช่องรหัสแต่รอลูกค้ากรอกเอง ไม่นับ)
+        auth_keywords = ["two_step_verification", "checkpoint", "auth_platform", "login/device-based", "login/identify"]
+        asked, gates = False, set()
+        for waited in range(0, 300, 2):
+            path = urllib.parse.urlparse(driver.current_url).path
+            if path not in gates and self._is_logged_in(driver):
+                if self._home_confirms_login(driver):
+                    return
+                # เด้งกลับหน้ายืนยัน จำหน้านั้นไว้ ไม่โหลดหน้าหลักทับซ้ำตอนลูกค้ากำลังทำ
+                gates |= {path, urllib.parse.urlparse(driver.current_url).path} - {"/", "/home.php"}
+            url = driver.current_url.lower()
+            on_form = bool(driver.find_elements(By.NAME, "email") or driver.find_elements(By.NAME, "pass"))
+            if on_form and not any(k in url for k in auth_keywords):
+                if waited >= 30:
+                    raise Exception("Login ด้วย UserID/Password ไม่สำเร็จ (รหัสผิด หรือ Facebook ไม่ให้เข้า) ใช้ปุ่ม Login ด้วยมือแทน")
+            elif waited >= 6:
+                # ใส่ path ไว้ในสถานะ ลูกค้าแคปจอมาจะได้รู้ว่า Facebook ขออะไร
+                self.update_status(f"{profile_name}: รอยืนยันตัวตนใน Chrome ({urllib.parse.urlparse(url).path})", "orange")
+                if not asked:
+                    asked = True
+                    self.root.after(0, lambda pn=profile_name: messagebox.showinfo(
+                        "ยืนยันตัวตน", f"Facebook ขอยืนยันตัวตนของ {pn}\nทำในหน้าต่าง Chrome ให้เสร็จ โปรแกรมจะไปต่อเอง"))
             time.sleep(2)
-        else:
-            raise Exception("Login ด้วย UserID/Password ไม่สำเร็จ (รหัสผิด หรือ Facebook ไม่ให้เข้า) ใช้ปุ่ม Login ด้วยมือแทน")
-
-        if is_auth_page:
-            self.update_status(f"{profile_name}: พบหน้ายืนยันตัวตน", "orange")
-            self.root.after(0, lambda pn=profile_name: messagebox.showinfo("ยืนยันตัวตน", f"กรุณายืนยันตัวตนสำหรับ Profile: {pn}\nเมื่อเสร็จแล้วกด OK"))
-
-            # รอจนกว่าจะกลับไปหน้า Facebook หลัก
-            max_wait = 300  # รอสูงสุด 5 นาที
-            wait_count = 0
-
-            while wait_count < max_wait:
-                time.sleep(2)
-                wait_count += 2
-                current_url = driver.current_url
-
-                # ตรวจสอบว่ากลับไปหน้า Facebook หลักแล้วหรือยัง
-                is_still_auth = any(keyword in current_url for keyword in auth_keywords)
-
-                if "facebook.com" in current_url and not is_still_auth:
-                    self.update_status(f"{profile_name}: ยืนยันตัวตนสำเร็จ กำลังรอ 10 วินาที...", "green")
-                    time.sleep(10)  # รอ 10 วินาทีหลังยืนยันตัวตนเสร็จ
-                    break
-
-            if wait_count >= max_wait:
-                raise Exception("หมดเวลารอการยืนยันตัวตน")
-
-            # กลับไปหน้า Facebook เริ่มต้นก่อน
-            self.update_status(f"{profile_name}: กลับไปหน้า Facebook หลัก...", "blue")
-            driver.get("https://www.facebook.com/")
-            time.sleep(3)
-            if not self._is_logged_in(driver):
-                raise Exception("ยืนยันตัวตนแล้วแต่ยังเข้า Facebook ไม่ได้ ใช้ปุ่ม Login ด้วยมือแทน")
+        raise Exception("รอยืนยันตัวตนเกิน 5 นาที ยังเข้า Facebook ไม่ได้ ใช้ปุ่ม Login ด้วยมือแทน")
 
     def _save_cookies_to_ini(self, driver, ini_path, force=False):
         """บันทึก Cookies จาก Selenium driver ลงไฟล์ .ini section [FBAccount] (เหมือน FBMKP)
