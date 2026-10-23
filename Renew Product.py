@@ -35,7 +35,7 @@ except Exception:
 
 # เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
 # ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
-APP_VERSION = 6
+APP_VERSION = 7
 UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
 UPDATE_FILE = "renew_update.py"
 
@@ -1611,6 +1611,10 @@ class FacebookMarketplaceRenewer:
                    'recover', 'authentication', 'challenge')
         return any(p in url for p in pending)
 
+    # หน้าจำบัญชีของ Facebook ตอน Cookie ตาย: รูป + ปุ่ม ดำเนินการต่อ / ใช้โปรไฟล์อื่น ไม่มีช่องอีเมล
+    OTHER_PROFILE_XPATH = ("//*[normalize-space(text())='ใช้โปรไฟล์อื่น' or "
+                           "normalize-space(text())='Use another profile']")
+
     def _is_logged_in(self, driver):
         """เข้า Facebook อยู่จริงไหม: มี Cookie c_user + หน้าไม่มีช่องอีเมล/รหัส + ไม่ติดหน้ายืนยันตัวตน
         เคยดูแค่ว่าไม่มีช่องอีเมล หน้าไหนที่ไม่ใช่ฟอร์ม Login (เช่นหน้าเลือกบัญชี) ก็นับว่าเข้าแล้ว
@@ -1620,7 +1624,9 @@ class FacebookMarketplaceRenewer:
             if any(k in url for k in ('checkpoint', 'two_step_verification', 'auth_platform', 'afad',
                                       'confirmemail', 'recover')):
                 return False
-            if driver.find_elements(By.NAME, "email") or driver.find_elements(By.NAME, "pass"):
+            # หน้าจำบัญชีนับว่ายังไม่เข้า แม้ c_user เก่าที่เพิ่งใส่ยังค้างอยู่
+            if (driver.find_elements(By.NAME, "email") or driver.find_elements(By.NAME, "pass")
+                    or driver.find_elements(By.XPATH, self.OTHER_PROFILE_XPATH)):
                 return False
             return bool(driver.get_cookie('c_user'))
         except Exception:
@@ -1749,8 +1755,7 @@ class FacebookMarketplaceRenewer:
                 # หน้าที่ลูกค้าเจอ 23 ต.ค.: Cookie ตาย Facebook จำบัญชีได้ โชว์รูป + ปุ่ม ดำเนินการต่อ / ใช้โปรไฟล์อื่น ไม่มีช่องอีเมล
                 # โหลดหน้าใหม่ก็ได้หน้าเดิม ต้องกด ใช้โปรไฟล์อื่น ให้ขึ้นฟอร์มอีเมล/รหัส ไม่เจอปุ่มก็ไปหน้า /login/ ตรงๆ
                 try:
-                    driver.find_element(By.XPATH, "//*[normalize-space(text())='ใช้โปรไฟล์อื่น' or "
-                                                  "normalize-space(text())='Use another profile']").click()
+                    driver.find_element(By.XPATH, self.OTHER_PROFILE_XPATH).click()
                 except Exception:
                     driver.get("https://www.facebook.com/login/")
                 time.sleep(random.uniform(3, 5))

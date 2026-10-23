@@ -661,7 +661,7 @@ def login_app(driver):
             raise TimeoutError
 
     renew_product.WebDriverWait = NoEmailField
-    renew_product.By = types.SimpleNamespace(NAME="name")
+    renew_product.By = types.SimpleNamespace(NAME="name", XPATH="xpath")
     renew_product.EC = types.SimpleNamespace(presence_of_element_located=lambda locator: None)
     driver.set_window_position = lambda x, y: None
     a.saved = []
@@ -799,12 +799,15 @@ def fb_page(url, cookies, form=False):
 def test_logged_in_needs_the_cookie_and_no_login_form():
     # เคยดูแค่ว่าไม่มีช่องอีเมล หน้าที่ไม่ใช่ฟอร์ม Login (เช่นหน้าเลือกบัญชี) เลยขึ้น Login สำเร็จทั้งที่ยังไม่ได้เข้า
     import types
-    renew_product.By = types.SimpleNamespace(NAME="name")
+    renew_product.By = types.SimpleNamespace(NAME="name", XPATH="xpath")
     assert app._is_logged_in(fb_page("https://www.facebook.com/", USER))
     assert app._is_logged_in(fb_page("https://www.facebook.com/login/save-device/", USER))  # หน้าจำอุปกรณ์หลัง Login
     assert not app._is_logged_in(fb_page("https://www.facebook.com/", []))
     assert not app._is_logged_in(fb_page("https://www.facebook.com/", USER, form=True))  # c_user เก่าค้างบนฟอร์ม Login
     assert not app._is_logged_in(fb_page("https://www.facebook.com/checkpoint/1/", USER))
+    chooser = fb_page("https://www.facebook.com/", USER)  # หน้าจำบัญชีที่ลูกค้าเจอ 23 ต.ค. c_user เก่ายังค้าง
+    chooser.find_elements = lambda by, value: [FakeEl()] if "ใช้โปรไฟล์อื่น" in value else []
+    assert not app._is_logged_in(chooser)
 
 
 def password_app():
