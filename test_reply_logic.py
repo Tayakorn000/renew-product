@@ -332,6 +332,12 @@ class FakeDriver:
     def get_cookies(self):
         return self.cookies
 
+    def get_cookie(self, name):
+        return next((c for c in self.cookies if c.get("name") == name), None)
+
+    def find_elements(self, by, value):
+        return []
+
     def quit(self):
         self.closed = True
 
@@ -671,7 +677,7 @@ def login_app(driver):
 def test_ini_is_left_alone_when_chrome_is_already_logged_in():
     # Chrome ของโปรไฟล์ล็อคอินค้างอยู่แล้ว = ไม่ได้ลอง Cookie ในไฟล์เลย ห้ามสรุปว่า Cookie หมดอายุแล้วเขียนทับ
     # ไฟล์นี้ FBMKP ใช้ร่วม เคยโดนทับทุกรอบที่กดเริ่ม
-    drv = FakeDriver()
+    drv = FakeDriver(USER)
     a = login_app(drv)
     try:
         a.open_and_login_profile("ID7")
@@ -779,6 +785,54 @@ def test_cookie_button_falls_back_to_the_password_in_the_ini():
     assert typed == [("a", "b%c")]  # รหัสมี % ต้องอ่านได้ (configparser ปกติพัง)
     assert [c["value"] for c in ini_cookies(ini) if c["name"] == "c_user"] == ["NEW"]
     assert not drv.closed and a.statuses[-1].startswith("Cookie Login เสร็จ: สำเร็จ 1/1")
+    assert any("สำเร็จด้วย UserID/Password" in s for s in a.statuses)  # ไม่ขึ้นแค่ว่าสำเร็จเฉยๆ ตอน Cookie ไม่ผ่าน
+
+
+def fb_page(url, cookies, form=False):
+    """Chrome ปลอมที่ค้างอยู่หน้าเดียว: url, Cookie, มีช่องอีเมล/รหัสไหม"""
+    drv = FakeDriver(cookies)
+    drv.current_url = url
+    drv.find_elements = lambda by, value: [FakeEl()] if form else []
+    return drv
+
+
+def test_logged_in_needs_the_cookie_and_no_login_form():
+    # เคยดูแค่ว่าไม่มีช่องอีเมล หน้าที่ไม่ใช่ฟอร์ม Login (เช่นหน้าเลือกบัญชี) เลยขึ้น Login สำเร็จทั้งที่ยังไม่ได้เข้า
+    import types
+    renew_product.By = types.SimpleNamespace(NAME="name")
+    assert app._is_logged_in(fb_page("https://www.facebook.com/", USER))
+    assert app._is_logged_in(fb_page("https://www.facebook.com/login/save-device/", USER))  # หน้าจำอุปกรณ์หลัง Login
+    assert not app._is_logged_in(fb_page("https://www.facebook.com/", []))
+    assert not app._is_logged_in(fb_page("https://www.facebook.com/", USER, form=True))  # c_user เก่าค้างบนฟอร์ม Login
+    assert not app._is_logged_in(fb_page("https://www.facebook.com/checkpoint/1/", USER))
+
+
+def test_wrong_password_is_reported_not_called_success():
+    # เคย raise ไว้ใน try/except: pass รหัสผิดก็ผ่านออกไปเงียบๆ แล้วขึ้น Login สำเร็จ
+    import types
+    a = reply_app()
+    renew_product.By = types.SimpleNamespace(NAME="name", XPATH="xpath")
+    renew_product.EC = types.SimpleNamespace(element_to_be_clickable=lambda locator: None)
+
+    class Found:
+        def __init__(self, *x):
+            pass
+
+        def until(self, condition):
+            return FakeEl()
+
+    renew_product.WebDriverWait = Found
+    for name in ("human_like_scroll_to_element", "random_mouse_movement", "human_like_clear_field",
+                 "human_like_type", "human_like_scroll"):
+        setattr(a, name, lambda *x: None)
+
+    err = None
+    try:
+        a._password_login(fb_page("https://www.facebook.com/login/?privacy_mutation_token=x", [], form=True), "ID7", "a", "b")
+    except Exception as e:
+        err = str(e)
+    assert err and "ไม่สำเร็จ" in err
+    assert a._password_login(fb_page("https://www.facebook.com/", USER), "ID7", "a", "b") is None
 
 
 def test_typing_emoji_does_not_break_the_message():
@@ -851,6 +905,8 @@ if __name__ == "__main__":
     test_manual_login_never_saves_a_checkpoint_session()
     test_manual_login_ignores_an_old_cookie_on_the_login_form()
     test_cookie_button_falls_back_to_the_password_in_the_ini()
+    test_logged_in_needs_the_cookie_and_no_login_form()
+    test_wrong_password_is_reported_not_called_success()
     test_typing_emoji_does_not_break_the_message()
     test_reply_settings_file_is_replaced_whole()
     test_new_notify_statuses_have_their_own_wording()

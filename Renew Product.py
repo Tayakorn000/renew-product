@@ -35,7 +35,7 @@ except Exception:
 
 # เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
 # ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
-APP_VERSION = 4
+APP_VERSION = 5
 UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
 UPDATE_FILE = "renew_update.py"
 
@@ -1028,7 +1028,10 @@ class FacebookMarketplaceRenewer:
                 # inject cookies และตรวจ Login — ใช้หน้า Facebook หลัก ไม่ใช่หน้า renew
                 # Cookie ผ่าน = ไม่เขียนทับ Cookie เดิม ถ้า inject ไม่ครบ จะทับของดีด้วยของที่ขาด
                 # (.ini ของลูกค้าเป็นต้นฉบับชุดเดียว) เขียนทับเฉพาะตอน login ใหม่สำเร็จเท่านั้น
+                how = "Cookie"
                 if not self._try_cookie_login(driver, cookies_raw):
+                    # บอกให้ชัดว่าเข้าด้วยรหัส ลูกค้าเห็น Cookie ไม่ผ่านแล้วขึ้นสำเร็จ จะนึกว่าโปรแกรมโกหก
+                    how = "UserID/Password เพราะ Cookie เดิมใช้ไม่ได้ (บันทึก Cookie ชุดใหม่แล้ว)"
                     # Cookie ใช้ไม่ได้ ลอง UserID/Password ใน .ini ต่อเหมือน FBMKP แล้วเก็บ Cookie ชุดใหม่ทับของเสีย
                     user_id, password = self._read_credentials(config_file_path)
                     if not (user_id and password):
@@ -1041,8 +1044,8 @@ class FacebookMarketplaceRenewer:
                     self._password_login(driver, profile_name, user_id, password)
                     self._save_cookies_to_ini(driver, config_file_path, force=True)
 
-                self.update_status(f"[{idx}/{total}] {profile_name}: Login สำเร็จ", "green")
-                results.append((profile_name, True, None))
+                self.update_status(f"[{idx}/{total}] {profile_name}: Login สำเร็จด้วย {how}", "green")
+                results.append((profile_name, True, how))
                 # ไม่ปิด driver — ให้หน้าต่าง Chrome ค้างอยู่ที่หน้า Facebook หลัก
                 driver = None
 
@@ -1062,12 +1065,12 @@ class FacebookMarketplaceRenewer:
                 time.sleep(random.uniform(2, 4))
 
         # สรุปผล
-        success = [r[0] for r in results if r[1]]
+        success = [(r[0], r[2]) for r in results if r[1]]
         failed  = [(r[0], r[2]) for r in results if not r[1]]
 
         summary_lines = [f"สำเร็จ {len(success)}/{total} Profile"]
         if success:
-            summary_lines += [f"  • {n}" for n in success]
+            summary_lines += [f"  • {n}: เข้าด้วย {how}" for n, how in success]
         if failed:
             summary_lines.append(f"\nล้มเหลว {len(failed)} Profile:")
             summary_lines += [f"  • {n}: {e}" for n, e in failed]
@@ -1608,6 +1611,21 @@ class FacebookMarketplaceRenewer:
                    'recover', 'authentication', 'challenge')
         return any(p in url for p in pending)
 
+    def _is_logged_in(self, driver):
+        """เข้า Facebook อยู่จริงไหม: มี Cookie c_user + หน้าไม่มีช่องอีเมล/รหัส + ไม่ติดหน้ายืนยันตัวตน
+        เคยดูแค่ว่าไม่มีช่องอีเมล หน้าไหนที่ไม่ใช่ฟอร์ม Login (เช่นหน้าเลือกบัญชี) ก็นับว่าเข้าแล้ว
+        ลูกค้าเลยเห็น Login สำเร็จ ทั้งที่ Chrome ยังไม่ได้เข้า ไม่ดูคำว่า login ใน URL เพราะหน้าจำอุปกรณ์หลัง Login ก็มี"""
+        try:
+            url = (driver.current_url or "").lower()
+            if any(k in url for k in ('checkpoint', 'two_step_verification', 'auth_platform', 'afad',
+                                      'confirmemail', 'recover')):
+                return False
+            if driver.find_elements(By.NAME, "email") or driver.find_elements(By.NAME, "pass"):
+                return False
+            return bool(driver.get_cookie('c_user'))
+        except Exception:
+            return False
+
     def _build_selenium_cookie(self, c):
         """แปลง cookie dict (ฟอร์แมต Playwright ของ FBMKP) เป็นฟอร์แมตที่ Selenium add_cookie รับ
         ต้องส่ง secure ไปด้วย — Chrome ตีตก cookie ที่ SameSite=None แต่ไม่มี Secure
@@ -1694,15 +1712,12 @@ class FacebookMarketplaceRenewer:
         time.sleep(random.uniform(4, 7))
 
         try:
-            current_url = driver.current_url
-            if self._is_login_pending_url(current_url):
-                return False
-            if driver.find_elements(By.NAME, "email"):
+            if self._is_login_pending_url(driver.current_url):
                 return False
         except Exception:
             return False
 
-        return True
+        return self._is_logged_in(driver)
 
     def _read_credentials(self, ini_path):
         """UserID, Password จาก section [FBAccount] (ไม่มี = ค่าว่าง)
@@ -1863,17 +1878,20 @@ class FacebookMarketplaceRenewer:
             if "err_too_many_redirects" in page_source or "this page isn't working" in page_source:
                 raise Exception("Facebook ตรวจพบ automation และบล็อคการเข้าถึง (ERR_TOO_MANY_REDIRECTS)")
 
-        # ตรวจสอบว่ายังอยู่หน้า login หรือไม่ (ล็อคอินไม่สำเร็จ)
-        if "login" in current_url.lower():
-            try:
-                if driver.find_elements(By.NAME, "email"):
-                    raise Exception("ล็อคอินไม่สำเร็จ - ยังอยู่หน้า login")
-            except:
-                pass
-
-        # ตรวจสอบว่าเจอหน้ายืนยันตัวตนหรือไม่ (ทุกรูปแบบ)
+        # รอจนเข้าได้จริง หรือเจอหน้ายืนยันตัวตน (Facebook บางทีพาไปหน้าถัดไปช้า เช็คครั้งเดียวไม่พอ)
+        # เคย raise ตอนยังอยู่หน้า login ไว้ใน try/except: pass รหัสผิดก็ไม่เคยแจ้ง ขึ้น Login สำเร็จตลอด
         auth_keywords = ["two_step_verification", "checkpoint", "auth_platform/afad", "login/device-based", "login/identify"]
-        is_auth_page = any(keyword in current_url for keyword in auth_keywords)
+        is_auth_page = False
+        for _ in range(15):
+            if self._is_logged_in(driver):
+                return
+            current_url = driver.current_url
+            is_auth_page = any(keyword in current_url for keyword in auth_keywords)
+            if is_auth_page:
+                break
+            time.sleep(2)
+        else:
+            raise Exception("Login ด้วย UserID/Password ไม่สำเร็จ (รหัสผิด หรือ Facebook ไม่ให้เข้า) ใช้ปุ่ม Login ด้วยมือแทน")
 
         if is_auth_page:
             self.update_status(f"{profile_name}: พบหน้ายืนยันตัวตน", "orange")
@@ -1903,6 +1921,8 @@ class FacebookMarketplaceRenewer:
             self.update_status(f"{profile_name}: กลับไปหน้า Facebook หลัก...", "blue")
             driver.get("https://www.facebook.com/")
             time.sleep(3)
+            if not self._is_logged_in(driver):
+                raise Exception("ยืนยันตัวตนแล้วแต่ยังเข้า Facebook ไม่ได้ ใช้ปุ่ม Login ด้วยมือแทน")
 
     def _save_cookies_to_ini(self, driver, ini_path, force=False):
         """บันทึก Cookies จาก Selenium driver ลงไฟล์ .ini section [FBAccount] (เหมือน FBMKP)
@@ -2053,37 +2073,13 @@ class FacebookMarketplaceRenewer:
             if random.random() < 0.4:  # 40% โอกาส
                 self.human_like_read_page(driver)
             
-            # ตรวจสอบว่าอยู่ในหน้า Facebook หลักหรือหน้าล็อคอิน
-            is_logged_in = False
-            
-            try:
-                # รอให้หน้าเว็บโหลดเสร็จก่อน
-                time.sleep(3)
-                
-                # ตรวจสอบจาก URL ก่อน
-                current_url = driver.current_url
-                
-                # ถ้า URL มี "login" แสดงว่ายังไม่ได้ล็อคอิน
-                if "login" in current_url.lower():
-                    is_logged_in = False
-                    self.update_status(f"{profile_name}: ยังไม่ได้ล็อคอิน", "orange")
-                else:
-                    # ลองหาช่อง email (รอสูงสุด 5 วินาที)
-                    try:
-                        WebDriverWait(driver, 5).until(
-                            EC.presence_of_element_located((By.NAME, "email"))
-                        )
-                        # เจอช่อง email = ยังไม่ได้ล็อคอิน
-                        is_logged_in = False
-                        self.update_status(f"{profile_name}: ยังไม่ได้ล็อคอิน", "orange")
-                    except:
-                        # ไม่เจอช่อง email = ล็อคอินอยู่แล้ว
-                        is_logged_in = True
-                        self.update_status(f"{profile_name}: ล็อคอินอยู่แล้ว", "green")
-            except:
-                # ถ้า error ให้ถือว่ายังไม่ได้ล็อคอิน (ปลอดภัยกว่า)
-                is_logged_in = False
-                self.update_status(f"{profile_name}: ไม่แน่ใจ กำลังลองล็อคอิน...", "orange")
+            # ตรวจสอบว่าอยู่ในหน้า Facebook หลักหรือหน้าล็อคอิน (เคยดูแค่ว่าไม่เจอช่อง email = เข้าแล้ว)
+            time.sleep(3)
+            is_logged_in = self._is_logged_in(driver)
+            if is_logged_in:
+                self.update_status(f"{profile_name}: ล็อคอินอยู่แล้ว", "green")
+            else:
+                self.update_status(f"{profile_name}: ยังไม่ได้ล็อคอิน", "orange")
 
             # ถ้ายังไม่ได้ล็อคอิน ลอง Login ด้วย Cookie ก่อน (เหมือน FBMKP)
             cookie_expired = False
