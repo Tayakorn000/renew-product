@@ -35,7 +35,7 @@ except Exception:
 
 # เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
 # ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
-APP_VERSION = 5
+APP_VERSION = 6
 UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
 UPDATE_FILE = "renew_update.py"
 
@@ -1746,8 +1746,14 @@ class FacebookMarketplaceRenewer:
             try:
                 for name in ('c_user', 'xs'):
                     driver.delete_cookie(name)
-                driver.get("https://www.facebook.com/")
-                time.sleep(random.uniform(4, 7))
+                # หน้าที่ลูกค้าเจอ 23 ต.ค.: Cookie ตาย Facebook จำบัญชีได้ โชว์รูป + ปุ่ม ดำเนินการต่อ / ใช้โปรไฟล์อื่น ไม่มีช่องอีเมล
+                # โหลดหน้าใหม่ก็ได้หน้าเดิม ต้องกด ใช้โปรไฟล์อื่น ให้ขึ้นฟอร์มอีเมล/รหัส ไม่เจอปุ่มก็ไปหน้า /login/ ตรงๆ
+                try:
+                    driver.find_element(By.XPATH, "//*[normalize-space(text())='ใช้โปรไฟล์อื่น' or "
+                                                  "normalize-space(text())='Use another profile']").click()
+                except Exception:
+                    driver.get("https://www.facebook.com/login/")
+                time.sleep(random.uniform(3, 5))
                 email_field = find_email_field()
             except Exception:
                 raise Exception("ไม่เจอช่องกรอกอีเมลของ Facebook (อาจติดหน้ายืนยันตัวตน) ใช้ปุ่ม Login ด้วยมือแทน")

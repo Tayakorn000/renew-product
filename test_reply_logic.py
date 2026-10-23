@@ -807,25 +807,64 @@ def test_logged_in_needs_the_cookie_and_no_login_form():
     assert not app._is_logged_in(fb_page("https://www.facebook.com/checkpoint/1/", USER))
 
 
-def test_wrong_password_is_reported_not_called_success():
-    # เคย raise ไว้ใน try/except: pass รหัสผิดก็ผ่านออกไปเงียบๆ แล้วขึ้น Login สำเร็จ
+def password_app():
+    """_password_login กับ Chrome ปลอม: หาช่องกรอกเจอเมื่อ driver.form ไม่เป็น False, กดปุ่ม Login = driver.submit()"""
     import types
     a = reply_app()
     renew_product.By = types.SimpleNamespace(NAME="name", XPATH="xpath")
-    renew_product.EC = types.SimpleNamespace(element_to_be_clickable=lambda locator: None)
+    renew_product.EC = types.SimpleNamespace(element_to_be_clickable=lambda locator: locator)
 
-    class Found:
-        def __init__(self, *x):
-            pass
+    class Wait:
+        def __init__(self, driver, timeout):
+            self.driver = driver
 
-        def until(self, condition):
-            return FakeEl()
+        def until(self, locator):
+            if locator[0] == "name" and getattr(self.driver, "form", True) is False:
+                raise TimeoutError
+            el = FakeEl()
+            if locator[0] == "xpath":
+                el.click = getattr(self.driver, "submit", lambda: None)
+            return el
 
-    renew_product.WebDriverWait = Found
+    renew_product.WebDriverWait = Wait
     for name in ("human_like_scroll_to_element", "random_mouse_movement", "human_like_clear_field",
                  "human_like_type", "human_like_scroll"):
         setattr(a, name, lambda *x: None)
+    return a
 
+
+def test_password_login_gets_past_the_remembered_account_page():
+    # 23 ต.ค. ลูกค้าเจอ: Cookie ตาย Facebook โชว์รูปบัญชี + ปุ่ม ดำเนินการต่อ / ใช้โปรไฟล์อื่น ไม่มีช่องอีเมล
+    # โหลดหน้าใหม่ก็ได้หน้าเดิม ต้องกด ใช้โปรไฟล์อื่น ก่อนถึงจะกรอกรหัสได้
+    import types
+
+    class Chooser(FakeDriver):
+        def __init__(self):
+            super().__init__()
+            self.current_url, self.form = "https://www.facebook.com/", False
+
+        def delete_cookie(self, name):
+            pass
+
+        def find_element(self, by, value):
+            if "ใช้โปรไฟล์อื่น" not in value:
+                raise LookupError(value)
+            return types.SimpleNamespace(click=lambda: setattr(self, "form", True))
+
+        def find_elements(self, by, value):
+            return [FakeEl()] if self.form and value in ("email", "pass") else []
+
+        def submit(self):
+            self.form, self.cookies = None, USER
+
+    drv = Chooser()
+    password_app()._password_login(drv, "ID7", "a", "b")
+    assert drv.get_cookie("c_user") and drv.visited == []
+
+
+def test_wrong_password_is_reported_not_called_success():
+    # เคย raise ไว้ใน try/except: pass รหัสผิดก็ผ่านออกไปเงียบๆ แล้วขึ้น Login สำเร็จ
+    a = password_app()
     err = None
     try:
         a._password_login(fb_page("https://www.facebook.com/login/?privacy_mutation_token=x", [], form=True), "ID7", "a", "b")
@@ -907,6 +946,7 @@ if __name__ == "__main__":
     test_cookie_button_falls_back_to_the_password_in_the_ini()
     test_logged_in_needs_the_cookie_and_no_login_form()
     test_wrong_password_is_reported_not_called_success()
+    test_password_login_gets_past_the_remembered_account_page()
     test_typing_emoji_does_not_break_the_message()
     test_reply_settings_file_is_replaced_whole()
     test_new_notify_statuses_have_their_own_wording()
