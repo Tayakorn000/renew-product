@@ -930,8 +930,8 @@ def test_password_login_does_not_trust_a_page_that_bounces_back():
     # และโหลดซ้ำแค่ครั้งเดียว ไม่งั้นทับหน้าที่ลูกค้ากำลังกรอกทุก 2 วิ
     err, drv, _ = password_login_over_time([
         (0, "https://www.facebook.com/unknown_gate/", USER, False),
-        (20, "https://www.facebook.com/", USER, False)])
-    assert err is None and drv.t >= 20 and len(drv.visited) == 2
+        (60, "https://www.facebook.com/", USER, False)])  # รอสุ่มก่อนเช็ครอบแรกรวมได้ถึง ~19 วิ หน้ายืนยันต้องอยู่นานกว่านั้น
+    assert err is None and drv.t >= 60 and len(drv.visited) == 2
 
 
 def test_manual_login_ok_reloads_home_before_giving_up():
@@ -1005,6 +1005,35 @@ def test_fbmkp_profile_is_found_by_its_ini_file():
     assert a.fbmkp_chrome_dir("D:/acc/ID7.ini") is None  # FBMKP ยังไม่เคยเปิดโปรไฟล์นี้
     a.fbmkp_folder = ""
     assert a.fbmkp_chrome_dir("D:/acc/ID8.ini") is None
+
+
+def test_linked_fbmkp_login_keeps_the_ini_in_step():
+    # เชื่อม FBMKP = โฟลเดอร์ Chrome เดียวกัน ล็อคอินอยู่แล้วต้องเขียน .ini ให้ตรง
+    # ไม่งั้น FBMKP เปิดครั้งหน้ายัด Cookie เก่าในไฟล์ใส่ Chrome ก่อนเสมอ หลุดทั้งสองโปรแกรม
+    a = login_app(FakeDriver(USER))
+    a.fbmkp_folder = fbmkp_folder({"ID7": a.profiles["ID7"]["config_file"]})
+    a.chrome_open_on = lambda d: False
+    try:
+        a.open_and_login_profile("ID7")
+    except StopAtSave:
+        pass
+    assert a.saved == [True]
+
+
+def test_cookie_button_leaves_a_logged_in_chrome_alone():
+    # Chrome ล็อคอินอยู่แล้ว ห้ามยัด Cookie จาก .ini ทับ เชื่อม FBMKP อยู่ก็เก็บชุดที่ใช้ได้ลง .ini
+    drv = FakeDriver(USER)
+    a = login_app(drv)
+    del a._save_cookies_to_ini  # ใช้ตัวจริง
+    ini = a.profiles["ID7"]["config_file"]
+    a.fbmkp_folder = fbmkp_folder({"ID7": ini})
+    a.chrome_open_on = lambda d: False
+    tried = []
+    a._try_cookie_login = lambda d, raw: tried.append(raw) or False
+    a.auto_cookie_login_profiles(["ID7"])
+    assert tried == [] and not drv.closed
+    assert [c["value"] for c in ini_cookies(ini) if c["name"] == "c_user"] == ["NEW"]
+    assert any("สำเร็จด้วย Chrome ที่ล็อคอินอยู่แล้ว" in s for s in a.statuses)
 
 
 def test_chrome_dir_uses_fbmkp_only_when_it_is_free():
@@ -1142,6 +1171,8 @@ if __name__ == "__main__":
     test_manual_login_moves_to_the_tab_that_is_left()
     test_fbmkp_profile_is_found_by_its_ini_file()
     test_chrome_dir_uses_fbmkp_only_when_it_is_free()
+    test_linked_fbmkp_login_keeps_the_ini_in_step()
+    test_cookie_button_leaves_a_logged_in_chrome_alone()
     test_chrome_open_on_reads_the_main_chrome_process()
     test_typing_emoji_does_not_break_the_message()
     test_reply_settings_file_is_replaced_whole()

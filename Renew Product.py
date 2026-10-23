@@ -35,7 +35,7 @@ except Exception:
 
 # เพิ่มเลขนี้แล้ว push = exe ของลูกค้าโหลดไฟล์นี้จาก GitHub ไปรันแทนตัวที่ฝังมา ตอนเปิดโปรแกรมรอบหน้า
 # ไม่เพิ่มเลข = push ได้ตามปกติ ลูกค้ายังไม่ได้ของใหม่
-APP_VERSION = 9
+APP_VERSION = 10
 UPDATE_URL = "https://raw.githubusercontent.com/Tayakorn000/renew-product/main/Renew%20Product.py"
 UPDATE_FILE = "renew_update.py"
 
@@ -1145,8 +1145,16 @@ class FacebookMarketplaceRenewer:
                 # inject cookies และตรวจ Login — ใช้หน้า Facebook หลัก ไม่ใช่หน้า renew
                 # Cookie ผ่าน = ไม่เขียนทับ Cookie เดิม ถ้า inject ไม่ครบ จะทับของดีด้วยของที่ขาด
                 # (.ini ของลูกค้าเป็นต้นฉบับชุดเดียว) เขียนทับเฉพาะตอน login ใหม่สำเร็จเท่านั้น
+                # Chrome ล็อคอินอยู่แล้ว (เช่น เข้าไว้แล้วใน FBMKP) ห้ามยัด Cookie จาก .ini ทับ .ini เก่ากว่า = ทำล็อคอินที่ใช้ได้หลุด
+                # เชื่อม FBMKP อยู่ก็เขียน .ini ให้ตรงกับโฟลเดอร์ที่ใช้ร่วม เพราะ FBMKP เปิดทีไรยัด Cookie ใน .ini ก่อนเสมอ
+                driver.get("https://www.facebook.com/")
+                time.sleep(random.uniform(4, 7))
                 how = "Cookie"
-                if not self._try_cookie_login(driver, cookies_raw):
+                if self._is_logged_in(driver):
+                    how = "Chrome ที่ล็อคอินอยู่แล้ว"
+                    if chrome_profile_dir != os.path.join(os.getcwd(), profile_data['chrome_profile']):
+                        self._save_cookies_to_ini(driver, config_file_path, force=True)
+                elif not self._try_cookie_login(driver, cookies_raw):
                     # บอกให้ชัดว่าเข้าด้วยรหัส ลูกค้าเห็น Cookie ไม่ผ่านแล้วขึ้นสำเร็จ จะนึกว่าโปรแกรมโกหก
                     how = "UserID/Password เพราะ Cookie เดิมใช้ไม่ได้ (บันทึก Cookie ชุดใหม่แล้ว)"
                     # Cookie ใช้ไม่ได้ ลอง UserID/Password ใน .ini ต่อเหมือน FBMKP แล้วเก็บ Cookie ชุดใหม่ทับของเสีย
@@ -1154,10 +1162,6 @@ class FacebookMarketplaceRenewer:
                     if not (user_id and password):
                         raise Exception("Cookie หมดอายุ และไฟล์ .ini ไม่มี UserID/Password กรุณา Login ด้วยมือแล้วบันทึก Cookie ใหม่")
                     self.update_status(f"[{idx}/{total}] {profile_name}: Cookie ใช้ไม่ได้ กำลัง Login ด้วยรหัส...", "orange")
-                    # ไม่มี Cookie ในไฟล์ = ยังไม่ได้เข้าหน้า Facebook เลย
-                    if "facebook.com" not in driver.current_url:
-                        driver.get("https://www.facebook.com/")
-                        time.sleep(random.uniform(4, 7))
                     self._password_login(driver, profile_name, user_id, password)
                     self._save_cookies_to_ini(driver, config_file_path, force=True)
 
@@ -2211,8 +2215,11 @@ class FacebookMarketplaceRenewer:
             # บันทึก Cookie ใหม่ไว้ใช้ครั้งต่อไป - เขียนทับเฉพาะตอน Cookie เดิมพิสูจน์แล้วว่าหมดอายุ
             # เคยเขียนทับทุกรอบที่ Chrome ล็อคอินค้างอยู่แล้วด้วย (ไม่ได้ลอง Cookie = นับว่าไม่ผ่าน)
             # ไฟล์นี้ FBMKP ใช้ร่วม โดนทับทุกรอบคือ FBMKP ถูกลากมาใช้ session ของโปรแกรมนี้
+            # ยกเว้นเชื่อม FBMKP (โฟลเดอร์ Chrome เดียวกัน session เดียวกัน): ต้องเขียนให้ .ini ตรงกับโฟลเดอร์ทุกรอบ
+            # FBMKP เปิดทีไรยัด Cookie ใน .ini ใส่ Chrome ก่อนเสมอ .ini เก่า = ทำล็อคอินที่ใช้ได้หลุดทั้งสองโปรแกรม
+            linked = chrome_profile_dir != os.path.join(os.getcwd(), profile_data['chrome_profile'])
             try:
-                self._save_cookies_to_ini(driver, config_file_path, force=cookie_expired)
+                self._save_cookies_to_ini(driver, config_file_path, force=cookie_expired or linked)
             except Exception:
                 pass
 
